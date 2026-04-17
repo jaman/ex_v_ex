@@ -36,6 +36,14 @@ First release. Pre-alpha — API may evolve.
 - `ExVEx.cells/2` — returns every populated cell on a sheet as a
   `%{ref => value}` map.
 - `ExVEx.each_cell/2` — streams every populated cell in row-major order.
+- `ExVEx.merge_cells/3,4`, `ExVEx.unmerge_cells/3,4`,
+  `ExVEx.merged_ranges/2` — merged-cell management with Excel-faithful
+  defaults (clears non-anchor cells on merge; exact-match required on
+  unmerge). Options: `:preserve_values` (`false` | `true`),
+  `:on_overlap` (`:error` | `:replace` | `:allow`), `:on_missing`
+  (`:error` | `:ignore`). Ranges are stored as
+  `<mergeCells><mergeCell ref="A1:B2"/></mergeCells>` in the worksheet
+  XML, inserted in the correct position in the schema's element order.
 - OOXML parsers: `Packaging.ContentTypes`, `Packaging.Relationships`,
   `OOXML.Workbook`, `OOXML.Worksheet`, `OOXML.SharedStrings`, `OOXML.Styles`.
 - Style model: `ExVEx.Style` + `Font`, `Fill`, `Border`, `Side`,
@@ -45,7 +53,7 @@ First release. Pre-alpha — API may evolve.
 
 ### Quality gates
 
-- 90 ExUnit tests, all passing.
+- 115 ExUnit tests, all passing.
 - `mix compile --warnings-as-errors`, `mix format --check-formatted`,
   `mix credo --strict` — all clean.
 - GitHub Actions CI runs the above plus dialyzer on every push / PR.

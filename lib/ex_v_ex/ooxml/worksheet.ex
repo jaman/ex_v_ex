@@ -9,7 +9,7 @@ defmodule ExVEx.OOXML.Worksheet do
   """
 
   alias ExVEx.OOXML.Worksheet.Cell
-  alias ExVEx.Utils.Coordinate
+  alias ExVEx.Utils.{Coordinate, Range}
 
   @type coordinate :: Coordinate.t()
   @type t :: %__MODULE__{cells: %{coordinate() => Cell.t()}}
@@ -50,6 +50,199 @@ defmodule ExVEx.OOXML.Worksheet do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  @doc """
+  Reads the existing `<mergeCells>` list from a worksheet XML document.
+  """
+  @spec merged_ranges(binary()) :: {:ok, [Range.t()]} | {:error, term()}
+  def merged_ranges(xml) when is_binary(xml) do
+    case Saxy.SimpleForm.parse_string(xml) do
+      {:ok, {"worksheet", _attrs, children}} ->
+        {:ok, collect_merged_ranges(children)}
+
+      {:ok, _other} ->
+        {:error, :not_a_worksheet}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Adds a merged range to the worksheet. When `clear_non_anchor?` is true,
+  every cell in the range other than the anchor (top-left) is removed from
+  `<sheetData>` — Excel's visible convention.
+  """
+  @spec merge(binary(), Range.t(), boolean()) :: {:ok, binary()} | {:error, term()}
+  def merge(xml, %Range{} = range, clear_non_anchor?) when is_binary(xml) do
+    mutate_worksheet(xml, fn children ->
+      children
+      |> maybe_clear_non_anchor(range, clear_non_anchor?)
+      |> upsert_merge_cells_section(&add_merge_ref(&1, range))
+    end)
+  end
+
+  @doc "Removes a merged range from the worksheet."
+  @spec unmerge(binary(), Range.t()) :: {:ok, binary()} | {:error, term()}
+  def unmerge(xml, %Range{} = range) when is_binary(xml) do
+    mutate_worksheet(xml, fn children ->
+      upsert_merge_cells_section(children, &remove_merge_ref(&1, range))
+    end)
+  end
+
+  defp mutate_worksheet(xml, transformer) do
+    case Saxy.SimpleForm.parse_string(xml) do
+      {:ok, {"worksheet", attrs, children}} ->
+        tree = {"worksheet", attrs, transformer.(children)}
+        {:ok, Saxy.encode!(tree, version: "1.0", encoding: "UTF-8", standalone: true)}
+
+      {:ok, _other} ->
+        {:error, :not_a_worksheet}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp collect_merged_ranges(children) do
+    children
+    |> Enum.find_value([], fn
+      {"mergeCells", _, items} -> items
+      _ -> nil
+    end)
+    |> Enum.flat_map(&merge_cell_to_range/1)
+  end
+
+  defp merge_cell_to_range({"mergeCell", attrs, _}) do
+    with {_, ref} <- List.keyfind(attrs, "ref", 0),
+         {:ok, range} <- Range.parse(ref) do
+      [range]
+    else
+      _ -> []
+    end
+  end
+
+  defp merge_cell_to_range(_), do: []
+
+  defp upsert_merge_cells_section(children, update_fn) do
+    case Enum.find_index(children, &match?({"mergeCells", _, _}, &1)) do
+      nil ->
+        new_section = build_merge_cells([], update_fn)
+        insert_merge_cells_section(children, new_section)
+
+      idx ->
+        {"mergeCells", _attrs, items} = Enum.at(children, idx)
+        updated = build_merge_cells(items, update_fn)
+        replace_or_drop(children, idx, updated)
+    end
+  end
+
+  defp build_merge_cells(items, update_fn) do
+    new_items = update_fn.(items)
+    {"mergeCells", [{"count", Integer.to_string(length(new_items))}], new_items}
+  end
+
+  defp replace_or_drop(children, idx, {"mergeCells", _, []}), do: List.delete_at(children, idx)
+
+  defp replace_or_drop(children, idx, new_section),
+    do: List.replace_at(children, idx, new_section)
+
+  defp insert_merge_cells_section(children, {"mergeCells", _, []}), do: children
+
+  defp insert_merge_cells_section(children, new_section) do
+    idx = Enum.find_index(children, &after_merge_cells?/1) || length(children)
+    List.insert_at(children, idx, new_section)
+  end
+
+  defp after_merge_cells?({name, _, _})
+       when name in [
+              "phoneticPr",
+              "conditionalFormatting",
+              "dataValidations",
+              "hyperlinks",
+              "printOptions",
+              "pageMargins",
+              "pageSetup",
+              "headerFooter",
+              "rowBreaks",
+              "colBreaks",
+              "customProperties",
+              "cellWatches",
+              "ignoredErrors",
+              "smartTags",
+              "drawing",
+              "legacyDrawing",
+              "legacyDrawingHF",
+              "picture",
+              "oleObjects",
+              "controls",
+              "webPublishItems",
+              "tableParts",
+              "extLst"
+            ],
+       do: true
+
+  defp after_merge_cells?(_), do: false
+
+  defp add_merge_ref(items, %Range{} = range) do
+    ref = Range.to_string(range)
+
+    if Enum.any?(items, &merge_ref?(&1, ref)) do
+      items
+    else
+      items ++ [{"mergeCell", [{"ref", ref}], []}]
+    end
+  end
+
+  defp remove_merge_ref(items, %Range{} = range) do
+    ref = Range.to_string(range)
+    Enum.reject(items, &merge_ref?(&1, ref))
+  end
+
+  defp merge_ref?({"mergeCell", attrs, _}, ref) do
+    case List.keyfind(attrs, "ref", 0) do
+      {_, ^ref} -> true
+      _ -> false
+    end
+  end
+
+  defp merge_ref?(_, _), do: false
+
+  defp maybe_clear_non_anchor(children, _range, false), do: children
+
+  defp maybe_clear_non_anchor(children, range, true) do
+    anchor = Range.anchor(range)
+
+    Enum.map(children, fn
+      {"sheetData", attrs, rows} -> {"sheetData", attrs, clear_rows(rows, range, anchor)}
+      other -> other
+    end)
+  end
+
+  defp clear_rows(rows, range, anchor) do
+    rows
+    |> Enum.map(fn
+      {"row", attrs, cells} -> {"row", attrs, drop_non_anchor_cells(cells, range, anchor)}
+      other -> other
+    end)
+    |> drop_empty_rows()
+  end
+
+  defp drop_non_anchor_cells(cells, range, anchor) do
+    Enum.reject(cells, fn
+      {"c", attrs, _} -> non_anchor_in_range?(attrs, range, anchor)
+      _ -> false
+    end)
+  end
+
+  defp non_anchor_in_range?(attrs, range, anchor) do
+    with {_, ref} <- List.keyfind(attrs, "r", 0),
+         {:ok, coord} <- Coordinate.parse(ref) do
+      Range.contains?(range, coord) and coord != anchor
+    else
+      _ -> false
     end
   end
 

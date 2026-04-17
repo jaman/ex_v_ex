@@ -22,6 +22,11 @@ ExVEx.get_style(book, "Sheet1", "A1")             #=> {:ok, %ExVEx.Style{...}}
 {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D4", ~D[2024-06-01])
 {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D5", {:formula, "=SUM(A1:A10)"})
 
+# Merge / unmerge
+{:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2")
+{:ok, ["A1:B2"]} = ExVEx.merged_ranges(book, "Sheet1")
+{:ok, book} = ExVEx.unmerge_cells(book, "Sheet1", "A1:B2")
+
 # Save
 :ok = ExVEx.save(book, "inventory.xlsx")
 ```
@@ -39,7 +44,7 @@ ExVEx fills that gap in pure Elixir.
 
 **v0.1 — pre-alpha.** Core read/write/round-trip is solid and externally
 validated against [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
-(Rust). 90 tests, zero credo issues, zero compile warnings.
+(Rust). 115 tests, zero credo issues, zero compile warnings.
 
 ### What works
 
@@ -55,11 +60,13 @@ validated against [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
 - Sheet navigation: `sheet_names/1`, `sheet_path/2`
 - Bulk reads: `cells/2` (map), `each_cell/2` (stream in row-major order)
 - Get cell formula: `get_formula/3`
+- Merge / unmerge cells with configurable overlap and value-preservation
+  behaviour (`merge_cells/3,4`, `unmerge_cells/3,4`, `merged_ranges/2`)
 
 ### Not yet
 
 - Style mutation (set bold, change font, etc.)
-- Row/column insertion, merged cells, defined names
+- Row/column insertion, defined names
 - Charts, images, pivot tables, comments
 
 ## Installation

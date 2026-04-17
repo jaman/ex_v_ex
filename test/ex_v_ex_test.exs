@@ -411,6 +411,124 @@ defmodule ExVExTest do
     end
   end
 
+  describe "merge_cells / unmerge_cells / merged_ranges" do
+    setup do
+      {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
+      out = Fixtures.tmp_path("merge.xlsx")
+      on_exit(fn -> File.rm(out) end)
+      %{book: book, out: out}
+    end
+
+    test "merge_cells adds a range, merged_ranges lists it", %{book: book, out: out} do
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2")
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert {:ok, ["A1:B2"]} = ExVEx.merged_ranges(reopened, "Sheet1")
+    end
+
+    test "default merge clears non-anchor cells but keeps the anchor", %{book: book, out: out} do
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2")
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert {:ok, "A1"} = ExVEx.get_cell(reopened, "Sheet1", "A1")
+      assert {:ok, nil} = ExVEx.get_cell(reopened, "Sheet1", "A2")
+      assert {:ok, nil} = ExVEx.get_cell(reopened, "Sheet1", "B1")
+      assert {:ok, nil} = ExVEx.get_cell(reopened, "Sheet1", "B2")
+
+      assert {:ok, "A3"} = ExVEx.get_cell(reopened, "Sheet1", "A3")
+    end
+
+    test "preserve_values: true leaves every cell's value intact", %{book: book, out: out} do
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2", preserve_values: true)
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert {:ok, "A1"} = ExVEx.get_cell(reopened, "Sheet1", "A1")
+      assert {:ok, "A2"} = ExVEx.get_cell(reopened, "Sheet1", "A2")
+      assert {:ok, "B1"} = ExVEx.get_cell(reopened, "Sheet1", "B1")
+      assert {:ok, "B2"} = ExVEx.get_cell(reopened, "Sheet1", "B2")
+
+      assert {:ok, ["A1:B2"]} = ExVEx.merged_ranges(reopened, "Sheet1")
+    end
+
+    test "on_overlap: :error refuses an overlapping merge", %{book: book} do
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2")
+
+      assert {:error, {:overlaps, "A1:B2"}} =
+               ExVEx.merge_cells(book, "Sheet1", "B2:C3")
+    end
+
+    test "on_overlap: :replace drops the overlapping range first", %{book: book, out: out} do
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2")
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "B2:C3", on_overlap: :replace)
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert {:ok, ["B2:C3"]} = ExVEx.merged_ranges(reopened, "Sheet1")
+    end
+
+    test "on_overlap: :allow lets partial overlaps coexist", %{book: book, out: out} do
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2")
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "B2:C3", on_overlap: :allow)
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      {:ok, ranges} = ExVEx.merged_ranges(reopened, "Sheet1")
+      assert Enum.sort(ranges) == ["A1:B2", "B2:C3"]
+    end
+
+    test "unmerge_cells removes an existing range", %{book: book, out: out} do
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2")
+      {:ok, book} = ExVEx.unmerge_cells(book, "Sheet1", "A1:B2")
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert {:ok, []} = ExVEx.merged_ranges(reopened, "Sheet1")
+    end
+
+    test "unmerge_cells errors on a range that isn't merged", %{book: book} do
+      assert {:error, :not_merged} = ExVEx.unmerge_cells(book, "Sheet1", "A1:B2")
+    end
+
+    test "unmerge_cells with on_missing: :ignore is a no-op", %{book: book} do
+      assert {:ok, ^book} = ExVEx.unmerge_cells(book, "Sheet1", "A1:B2", on_missing: :ignore)
+    end
+
+    test "merged_ranges on a sheet with no merges returns []", %{book: book} do
+      assert {:ok, []} = ExVEx.merged_ranges(book, "Sheet1")
+    end
+
+    test "unmerged non-anchor cells stay empty (Excel convention; values not restored)", %{
+      book: book,
+      out: out
+    } do
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2")
+      {:ok, book} = ExVEx.unmerge_cells(book, "Sheet1", "A1:B2")
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert {:ok, "A1"} = ExVEx.get_cell(reopened, "Sheet1", "A1")
+      assert {:ok, nil} = ExVEx.get_cell(reopened, "Sheet1", "A2")
+    end
+
+    test "merging an invalid range returns :invalid_range", %{book: book} do
+      assert {:error, :invalid_range} = ExVEx.merge_cells(book, "Sheet1", "not a range")
+    end
+
+    test "merging on an unknown sheet returns :unknown_sheet", %{book: book} do
+      assert {:error, :unknown_sheet} = ExVEx.merge_cells(book, "Ghost", "A1:B2")
+    end
+  end
+
   describe "multi-sheet writes" do
     test "put_cell can target multiple sheets in sequence and all survive save" do
       out = Fixtures.tmp_path("multi_sheet.xlsx")

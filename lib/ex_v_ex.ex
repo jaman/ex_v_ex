@@ -20,7 +20,7 @@ defmodule ExVEx do
   alias ExVEx.OOXML.{SharedStrings, Styles, Worksheet}
   alias ExVEx.OOXML.Workbook, as: WorkbookXml
   alias ExVEx.Packaging.{ContentTypes, Relationships, Zip}
-  alias ExVEx.Utils.Coordinate
+  alias ExVEx.Utils.{Coordinate, Range}
   alias ExVEx.Workbook
 
   @type path :: Path.t()
@@ -171,6 +171,113 @@ defmodule ExVEx do
       {:ok, Styles.resolve(book.styles || %Styles{}, style_id)}
     end
   end
+
+  @type range_ref :: String.t()
+
+  @doc """
+  Merges a rectangular range of cells on a sheet.
+
+  ## Options
+
+    * `:preserve_values` — `false` (default) to clear every non-anchor cell
+      in the range (Excel's convention); `true` to leave underlying cells
+      untouched. Excel will still only display the anchor cell's value,
+      but `get_cell/3` on a non-anchor cell will keep returning whatever
+      was there.
+    * `:on_overlap` — `:error` (default) to refuse a range that overlaps
+      an existing merge and return `{:error, {:overlaps, existing_ref}}`;
+      `:replace` to remove the overlapping range(s) first; `:allow` to
+      permit overlapping ranges (matches openpyxl's lenient behaviour).
+  """
+  @spec merge_cells(Workbook.t(), sheet_name(), range_ref(), keyword()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def merge_cells(%Workbook{} = book, sheet, ref, opts \\ []) do
+    preserve = Keyword.get(opts, :preserve_values, false)
+    on_overlap = Keyword.get(opts, :on_overlap, :error)
+
+    with {:ok, range} <- parse_range(ref),
+         {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, xml} <- fetch_part(book.parts, path),
+         {:ok, xml} <- handle_overlap(xml, range, on_overlap),
+         {:ok, new_xml} <- Worksheet.merge(xml, range, not preserve) do
+      {:ok, %{book | parts: Map.put(book.parts, path, new_xml)}}
+    end
+  end
+
+  @doc """
+  Removes a merged range from a sheet.
+
+  ## Options
+
+    * `:on_missing` — `:error` (default) returns `{:error, :not_merged}`
+      when the exact range is not currently merged; `:ignore` makes the
+      call a no-op in that case.
+  """
+  @spec unmerge_cells(Workbook.t(), sheet_name(), range_ref(), keyword()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def unmerge_cells(%Workbook{} = book, sheet, ref, opts \\ []) do
+    on_missing = Keyword.get(opts, :on_missing, :error)
+
+    with {:ok, range} <- parse_range(ref),
+         {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, xml} <- fetch_part(book.parts, path),
+         {:ok, existing} <- Worksheet.merged_ranges(xml) do
+      apply_unmerge(book, path, xml, range, existing, on_missing)
+    end
+  end
+
+  defp apply_unmerge(book, path, xml, range, existing, on_missing) do
+    if Enum.any?(existing, &exact_match?(&1, range)) do
+      with {:ok, new_xml} <- Worksheet.unmerge(xml, range),
+           do: {:ok, %{book | parts: Map.put(book.parts, path, new_xml)}}
+    else
+      handle_missing_unmerge(book, on_missing)
+    end
+  end
+
+  @doc """
+  Returns the list of merged ranges on a sheet as A1-style range refs.
+  """
+  @spec merged_ranges(Workbook.t(), sheet_name()) :: {:ok, [range_ref()]} | {:error, term()}
+  def merged_ranges(%Workbook{} = book, sheet) do
+    with {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, xml} <- fetch_part(book.parts, path),
+         {:ok, ranges} <- Worksheet.merged_ranges(xml) do
+      {:ok, Enum.map(ranges, &Range.to_string/1)}
+    end
+  end
+
+  defp parse_range(ref) do
+    case Range.parse(ref) do
+      {:ok, range} -> {:ok, range}
+      :error -> {:error, :invalid_range}
+    end
+  end
+
+  defp exact_match?(%Range{} = a, %Range{} = b) do
+    a.top_left == b.top_left and a.bottom_right == b.bottom_right
+  end
+
+  defp handle_overlap(xml, _range, :allow), do: {:ok, xml}
+
+  defp handle_overlap(xml, range, mode) when mode in [:error, :replace] do
+    {:ok, existing} = Worksheet.merged_ranges(xml)
+    overlap = Enum.find(existing, &(Range.overlaps?(&1, range) and not exact_match?(&1, range)))
+
+    case {overlap, mode} do
+      {nil, _} ->
+        {:ok, xml}
+
+      {conflict, :error} ->
+        {:error, {:overlaps, Range.to_string(conflict)}}
+
+      {conflict, :replace} ->
+        Worksheet.unmerge(xml, conflict)
+    end
+  end
+
+  defp handle_missing_unmerge(book, :ignore), do: {:ok, book}
+  defp handle_missing_unmerge(_book, :error), do: {:error, :not_merged}
 
   @spec get_formula(Workbook.t(), sheet_name(), cell_ref()) ::
           {:ok, String.t() | nil} | {:error, term()}
