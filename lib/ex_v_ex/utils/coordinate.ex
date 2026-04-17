@@ -13,9 +13,8 @@ defmodule ExVEx.Utils.Coordinate do
   @spec parse(String.t()) :: {:ok, t()} | :error
   def parse(binary) when is_binary(binary) do
     with {letters, digits} <- split_letters_and_digits(binary),
-         {:ok, col} <- parse_column(letters),
          {:ok, row} <- parse_row(digits) do
-      {:ok, {row, col}}
+      {:ok, {row, column_number(letters)}}
     end
   end
 
@@ -53,11 +52,6 @@ defmodule ExVEx.Utils.Coordinate do
       [_, letters, digits] -> {letters, digits}
       _ -> :error
     end
-  end
-
-  defp parse_column(letters) do
-    n = column_number(letters)
-    if n >= 1, do: {:ok, n}, else: :error
   end
 
   defp parse_row(digits) do
