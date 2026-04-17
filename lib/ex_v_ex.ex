@@ -1,0 +1,377 @@
+defmodule ExVEx do
+  @moduledoc """
+  Pure-Elixir reader and editor for `.xlsx` / `.xlsm` workbooks.
+
+  ## Quick start
+
+      {:ok, book} = ExVEx.open("path/to/file.xlsx")
+      ExVEx.sheet_names(book)            #=> ["Sheet1", "Sheet2"]
+      {:ok, "hello"} = ExVEx.get_cell(book, "Sheet1", "A1")
+      :ok = ExVEx.save(book, "path/to/output.xlsx")
+
+  ## Design
+
+  ExVEx opens a workbook lazily: raw ZIP part bytes are kept in memory and
+  untouched parts are written back verbatim on `save/2`. This preserves
+  unknown content (custom XML, VBA macros, extension schemas) on round-trip
+  without the caller needing to opt in.
+  """
+
+  alias ExVEx.OOXML.{SharedStrings, Styles, Worksheet}
+  alias ExVEx.OOXML.Workbook, as: WorkbookXml
+  alias ExVEx.Packaging.{ContentTypes, Relationships, Zip}
+  alias ExVEx.Utils.Coordinate
+  alias ExVEx.Workbook
+
+  @type path :: Path.t()
+  @type sheet_name :: String.t()
+  @type cell_ref :: String.t()
+  @type cell_value ::
+          binary()
+          | number()
+          | boolean()
+          | nil
+          | {:formula, String.t()}
+          | {:formula, String.t(), binary() | number() | boolean()}
+
+  @package_rels_path "_rels/.rels"
+  @office_document_type "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+  @shared_strings_type "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings"
+  @styles_type "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"
+
+  @spec open(path()) :: {:ok, Workbook.t()} | {:error, term()}
+  def open(path) do
+    with {:ok, entries} <- Zip.read(path),
+         parts = entries_to_parts(entries),
+         {:ok, manifest_xml} <- fetch_part(parts, "[Content_Types].xml"),
+         {:ok, content_types} <- ContentTypes.parse(manifest_xml),
+         {:ok, package_rels_xml} <- fetch_part(parts, @package_rels_path),
+         {:ok, package_rels} <- Relationships.parse(package_rels_xml),
+         {:ok, workbook_path} <- resolve_workbook_path(package_rels),
+         {:ok, workbook_xml} <- fetch_part(parts, workbook_path),
+         {:ok, workbook} <- WorkbookXml.parse(workbook_xml),
+         workbook_rels_path = rels_path_for(workbook_path),
+         {:ok, workbook_rels_xml} <- fetch_part(parts, workbook_rels_path),
+         {:ok, workbook_rels} <- Relationships.parse(workbook_rels_xml),
+         {:ok, shared_strings} <- maybe_load_shared_strings(parts, workbook_rels, workbook_path),
+         {:ok, styles} <- maybe_load_styles(parts, workbook_rels, workbook_path) do
+      {:ok,
+       %Workbook{
+         parts: parts,
+         part_order: Enum.map(entries, & &1.path),
+         content_types: content_types,
+         workbook: workbook,
+         workbook_rels: workbook_rels,
+         workbook_path: workbook_path,
+         shared_strings: shared_strings,
+         styles: styles,
+         source_path: path
+       }}
+    end
+  end
+
+  @spec save(Workbook.t(), path()) :: :ok | {:error, term()}
+  def save(%Workbook{} = book, path) do
+    entries = Workbook.to_entries(book)
+    Zip.write(path, entries)
+  end
+
+  @spec sheet_names(Workbook.t()) :: [sheet_name()]
+  def sheet_names(%Workbook{workbook: %WorkbookXml{sheets: sheets}}) do
+    Enum.map(sheets, & &1.name)
+  end
+
+  @spec sheet_path(Workbook.t(), sheet_name()) :: {:ok, String.t()} | :error
+  def sheet_path(%Workbook{} = book, name) do
+    with %{} = ref <- Enum.find(book.workbook.sheets, &(&1.name == name)),
+         {:ok, rel} <- Relationships.get(book.workbook_rels, ref.rel_id) do
+      {:ok, Relationships.resolve(rel, rels_path_for(book.workbook_path))}
+    else
+      _ -> :error
+    end
+  end
+
+  @spec get_cell(Workbook.t(), sheet_name(), cell_ref()) ::
+          {:ok, cell_value() | Date.t() | NaiveDateTime.t()} | {:error, term()}
+  def get_cell(%Workbook{} = book, sheet, ref) do
+    with {:ok, coord} <- parse_coordinate(ref),
+         {:ok, sheet_xml} <- fetch_sheet_xml(book, sheet),
+         {:ok, worksheet} <- Worksheet.parse(sheet_xml) do
+      case Map.fetch(worksheet.cells, coord) do
+        {:ok, cell} -> resolve_cell_value(cell, book)
+        :error -> {:ok, nil}
+      end
+    end
+  end
+
+  @spec put_cell(Workbook.t(), sheet_name(), cell_ref(), cell_value()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def put_cell(%Workbook{} = book, sheet, ref, value) do
+    with {:ok, coord} <- parse_coordinate(ref),
+         {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, xml} <- fetch_part(book.parts, path),
+         {:ok, new_xml} <- Worksheet.put_cell(xml, coord, value) do
+      {:ok, %{book | parts: Map.put(book.parts, path, new_xml)}}
+    end
+  end
+
+  @spec get_formula(Workbook.t(), sheet_name(), cell_ref()) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def get_formula(%Workbook{} = book, sheet, ref) do
+    with {:ok, coord} <- parse_coordinate(ref),
+         {:ok, sheet_xml} <- fetch_sheet_xml(book, sheet),
+         {:ok, worksheet} <- Worksheet.parse(sheet_xml) do
+      case Map.fetch(worksheet.cells, coord) do
+        {:ok, %{formula: formula}} -> {:ok, formula}
+        :error -> {:ok, nil}
+      end
+    end
+  end
+
+  @doc """
+  Returns every populated cell on a sheet as a map of A1 refs to resolved
+  values. Empty cells are omitted.
+  """
+  @spec cells(Workbook.t(), sheet_name()) :: {:ok, %{cell_ref() => term()}} | {:error, term()}
+  def cells(%Workbook{} = book, sheet) do
+    with {:ok, sheet_xml} <- fetch_sheet_xml(book, sheet),
+         {:ok, worksheet} <- Worksheet.parse(sheet_xml) do
+      {:ok, Enum.reduce(worksheet.cells, %{}, &put_resolved(&1, &2, book))}
+    end
+  end
+
+  defp put_resolved({coord, cell}, acc, book) do
+    case resolve_cell_value(cell, book) do
+      {:ok, value} -> Map.put(acc, Coordinate.to_string(coord), value)
+      {:error, _} -> acc
+    end
+  end
+
+  @doc """
+  Streams every populated cell on a sheet as `{a1_ref, value}` pairs in
+  row-major order (row 1 before row 2; column A before column B within a
+  row).
+  """
+  @spec each_cell(Workbook.t(), sheet_name()) ::
+          {:ok, Enumerable.t({cell_ref(), term()})} | {:error, term()}
+  def each_cell(%Workbook{} = book, sheet) do
+    with {:ok, sheet_xml} <- fetch_sheet_xml(book, sheet),
+         {:ok, worksheet} <- Worksheet.parse(sheet_xml) do
+      stream =
+        worksheet.cells
+        |> Enum.sort_by(fn {coord, _} -> coord end)
+        |> Stream.flat_map(&resolve_to_pair(&1, book))
+
+      {:ok, stream}
+    end
+  end
+
+  defp resolve_to_pair({coord, cell}, book) do
+    case resolve_cell_value(cell, book) do
+      {:ok, value} -> [{Coordinate.to_string(coord), value}]
+      {:error, _} -> []
+    end
+  end
+
+  defp sheet_path_or_error(book, sheet) do
+    case sheet_path(book, sheet) do
+      {:ok, path} -> {:ok, path}
+      :error -> {:error, :unknown_sheet}
+    end
+  end
+
+  defp parse_coordinate(ref) do
+    case Coordinate.parse(ref) do
+      {:ok, coord} -> {:ok, coord}
+      :error -> {:error, :invalid_coordinate}
+    end
+  end
+
+  defp fetch_sheet_xml(book, sheet) do
+    with {:ok, path} <- sheet_path_or_error(book, sheet) do
+      fetch_part(book.parts, path)
+    end
+  end
+
+  defp resolve_cell_value(%{raw_type: :shared_string, raw_value: idx_str}, %Workbook{
+         shared_strings: %SharedStrings{} = sst
+       }) do
+    with {idx, ""} <- Integer.parse(idx_str || ""),
+         {:ok, text} <- SharedStrings.get(sst, idx) do
+      {:ok, text}
+    else
+      _ -> {:error, :invalid_shared_string_index}
+    end
+  end
+
+  defp resolve_cell_value(%{raw_type: :shared_string}, _), do: {:error, :no_shared_string_table}
+
+  defp resolve_cell_value(%{raw_type: :inline_string, raw_value: text}, _), do: {:ok, text || ""}
+  defp resolve_cell_value(%{raw_type: :boolean, raw_value: "1"}, _), do: {:ok, true}
+  defp resolve_cell_value(%{raw_type: :boolean, raw_value: "0"}, _), do: {:ok, false}
+
+  defp resolve_cell_value(%{raw_type: :number} = cell, %Workbook{} = book) do
+    case parse_number(cell.raw_value) do
+      {:ok, number} when is_number(number) -> maybe_as_date(number, cell, book)
+      other -> other
+    end
+  end
+
+  defp resolve_cell_value(%{raw_type: :formula_string, raw_value: text}, _), do: {:ok, text || ""}
+
+  defp resolve_cell_value(%{raw_type: :error, raw_value: code}, _) do
+    {:error, {:cell_error, code}}
+  end
+
+  defp maybe_as_date(number, %{style_id: nil}, _), do: {:ok, number}
+  defp maybe_as_date(number, _cell, %Workbook{styles: nil}), do: {:ok, number}
+
+  defp maybe_as_date(number, %{style_id: style_id}, %Workbook{styles: styles}) do
+    with {:ok, xf} <- Styles.cell_format(styles, style_id),
+         true <- Styles.date_format?(styles, xf),
+         {:ok, value} <- serial_to_temporal(number, date_format_code(styles, xf)) do
+      {:ok, value}
+    else
+      _ -> {:ok, number}
+    end
+  end
+
+  defp date_format_code(%Styles{num_fmts: num_fmts}, %{num_fmt_id: id}) do
+    case Enum.find(num_fmts, &(&1.id == id)) do
+      %{format_code: code} -> code
+      nil -> builtin_format_code(id)
+    end
+  end
+
+  @builtin_date_codes %{
+    14 => "m/d/yyyy",
+    15 => "d-mmm-yy",
+    16 => "d-mmm",
+    17 => "mmm-yy",
+    18 => "h:mm AM/PM",
+    19 => "h:mm:ss AM/PM",
+    20 => "h:mm",
+    21 => "h:mm:ss",
+    22 => "m/d/yyyy h:mm",
+    45 => "mm:ss",
+    46 => "[h]:mm:ss",
+    47 => "mm:ss.0"
+  }
+
+  defp builtin_format_code(id), do: Map.get(@builtin_date_codes, id, "")
+
+  defp serial_to_temporal(number, format_code) do
+    if time_bearing_code?(format_code) do
+      serial_to_naive_datetime(number)
+    else
+      serial_to_date(number)
+    end
+  end
+
+  defp time_bearing_code?(code), do: Regex.match?(~r/[hHsS]/, code)
+
+  defp serial_to_date(serial) when is_number(serial) and serial >= 1 do
+    days = trunc(serial)
+    epoch = if days < 60, do: ~D[1899-12-31], else: ~D[1899-12-30]
+    {:ok, Date.add(epoch, days)}
+  end
+
+  defp serial_to_date(_), do: {:error, :serial_out_of_range}
+
+  defp serial_to_naive_datetime(serial) when is_number(serial) and serial >= 0 do
+    days = trunc(serial)
+    fraction = serial - days
+    seconds_in_day = round(fraction * 86_400)
+
+    date =
+      if days == 0 do
+        ~D[1899-12-30]
+      else
+        epoch = if days < 60, do: ~D[1899-12-31], else: ~D[1899-12-30]
+        Date.add(epoch, days)
+      end
+
+    {:ok, NaiveDateTime.add(NaiveDateTime.new!(date, ~T[00:00:00]), seconds_in_day, :second)}
+  end
+
+  defp serial_to_naive_datetime(_), do: {:error, :serial_out_of_range}
+
+  defp parse_number(nil), do: {:ok, nil}
+
+  defp parse_number(raw) do
+    if String.contains?(raw, [".", "e", "E"]) do
+      case Float.parse(raw) do
+        {f, ""} -> {:ok, f}
+        _ -> {:error, {:bad_number, raw}}
+      end
+    else
+      case Integer.parse(raw) do
+        {n, ""} -> {:ok, n}
+        _ -> {:error, {:bad_number, raw}}
+      end
+    end
+  end
+
+  defp entries_to_parts(entries) do
+    Map.new(entries, fn %{path: p, data: data} -> {p, data} end)
+  end
+
+  defp fetch_part(parts, key) do
+    case Map.fetch(parts, key) do
+      {:ok, data} -> {:ok, data}
+      :error -> {:error, {:missing_part, key}}
+    end
+  end
+
+  defp resolve_workbook_path(%Relationships{entries: entries}) do
+    case Enum.find(entries, &(&1.type == @office_document_type)) do
+      nil -> {:error, :no_office_document_relationship}
+      rel -> {:ok, Relationships.resolve(rel, @package_rels_path)}
+    end
+  end
+
+  defp maybe_load_shared_strings(parts, rels, workbook_path) do
+    load_relationship_part(
+      parts,
+      rels,
+      workbook_path,
+      @shared_strings_type,
+      &SharedStrings.parse/1
+    )
+  end
+
+  defp maybe_load_styles(parts, rels, workbook_path) do
+    load_relationship_part(parts, rels, workbook_path, @styles_type, &Styles.parse/1)
+  end
+
+  defp load_relationship_part(
+         parts,
+         %Relationships{entries: entries},
+         workbook_path,
+         type,
+         parser
+       ) do
+    case Enum.find(entries, &(&1.type == type)) do
+      nil ->
+        {:ok, nil}
+
+      rel ->
+        path = Relationships.resolve(rel, rels_path_for(workbook_path))
+
+        case Map.fetch(parts, path) do
+          {:ok, xml} -> parser.(xml)
+          :error -> {:ok, nil}
+        end
+    end
+  end
+
+  defp rels_path_for(part_path) do
+    dir = Path.dirname(part_path)
+    base = Path.basename(part_path)
+
+    case dir do
+      "." -> "_rels/#{base}.rels"
+      _ -> "#{dir}/_rels/#{base}.rels"
+    end
+  end
+end
