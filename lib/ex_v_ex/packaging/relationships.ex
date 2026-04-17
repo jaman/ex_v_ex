@@ -16,6 +16,8 @@ defmodule ExVEx.Packaging.Relationships do
 
   alias ExVEx.Packaging.Relationships.Relationship
 
+  @namespace "http://schemas.openxmlformats.org/package/2006/relationships"
+
   @type t :: %__MODULE__{entries: [Relationship.t()]}
   defstruct entries: []
 
@@ -32,6 +34,24 @@ defmodule ExVEx.Packaging.Relationships do
         {:error, reason}
     end
   end
+
+  @spec serialize(t()) :: binary()
+  def serialize(%__MODULE__{entries: entries}) do
+    children = Enum.map(entries, &relationship_element/1)
+    root = Saxy.XML.element("Relationships", [{"xmlns", @namespace}], children)
+    Saxy.encode!(root, version: "1.0", encoding: "UTF-8", standalone: true)
+  end
+
+  defp relationship_element(%Relationship{} = rel) do
+    attrs =
+      [{"Id", rel.id}, {"Type", rel.type}, {"Target", rel.target}] ++
+        target_mode_attr(rel.target_mode)
+
+    Saxy.XML.element("Relationship", attrs, [])
+  end
+
+  defp target_mode_attr(:external), do: [{"TargetMode", "External"}]
+  defp target_mode_attr(_), do: []
 
   @spec get(t(), String.t()) :: {:ok, Relationship.t()} | :error
   def get(%__MODULE__{entries: entries}, id) do

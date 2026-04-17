@@ -51,6 +51,19 @@ First release. Pre-alpha — API may evolve.
 - Coordinate utilities: `ExVEx.Utils.Coordinate` — A1 ↔ `{row, col}`,
   Excel's bijective base-26 column labels.
 
+### Formula freshness on save
+
+When a workbook is mutated, ExVEx invalidates the calculation chain cache
+so Excel recomputes formulas on open instead of showing stale `#N/A`
+placeholders. On save of a dirty workbook:
+
+- `xl/calcChain.xml` is dropped from the archive.
+- Its entry is removed from `[Content_Types].xml` and
+  `xl/_rels/workbook.xml.rels`.
+- `<calcPr fullCalcOnLoad="1">` is set on `xl/workbook.xml`.
+
+No-op saves (open → save without mutation) leave every part byte-identical.
+
 ### Coordinate addressing
 
 Every cell-addressing function (`get_cell/3`, `put_cell/4`, `get_formula/3`,
@@ -61,7 +74,7 @@ is also public if you need to convert explicitly.
 
 ### Quality gates
 
-- 119 ExUnit tests, all passing.
+- 125 ExUnit tests, all passing.
 - `mix compile --warnings-as-errors`, `mix format --check-formatted`,
   `mix credo --strict` — all clean.
 - GitHub Actions CI runs the above plus dialyzer on every push / PR.

@@ -34,6 +34,7 @@ defmodule ExVEx.Workbook do
             styles: nil,
             styles_path: nil,
             styles_dirty: false,
+            calc_dirty: false,
             source_path: nil
 
   @type t :: %__MODULE__{
@@ -49,6 +50,7 @@ defmodule ExVEx.Workbook do
           styles: Styles.t() | nil,
           styles_path: String.t() | nil,
           styles_dirty: boolean(),
+          calc_dirty: boolean(),
           source_path: Path.t() | nil
         }
 
@@ -62,6 +64,84 @@ defmodule ExVEx.Workbook do
     book
     |> flush_shared_strings()
     |> flush_styles()
+    |> flush_calc_invalidation()
+  end
+
+  defp flush_calc_invalidation(%__MODULE__{calc_dirty: false} = book), do: book
+
+  defp flush_calc_invalidation(%__MODULE__{} = book) do
+    book
+    |> drop_calc_chain()
+    |> force_full_calc_on_load()
+    |> Map.put(:calc_dirty, false)
+  end
+
+  defp drop_calc_chain(%__MODULE__{parts: parts} = book) do
+    calc_chain_path = find_calc_chain_path(book)
+
+    if calc_chain_path do
+      book
+      |> Map.put(:parts, Map.delete(parts, calc_chain_path))
+      |> Map.put(:part_order, Enum.reject(book.part_order, &(&1 == calc_chain_path)))
+      |> drop_calc_chain_content_type()
+      |> drop_calc_chain_relationship(calc_chain_path)
+    else
+      book
+    end
+  end
+
+  defp find_calc_chain_path(%__MODULE__{parts: parts}) do
+    Enum.find(Map.keys(parts), &String.ends_with?(&1, "calcChain.xml"))
+  end
+
+  defp drop_calc_chain_content_type(%__MODULE__{content_types: ct, parts: parts} = book) do
+    new_overrides =
+      Enum.reject(ct.overrides, &String.ends_with?(&1.part_name, "calcChain.xml"))
+
+    new_ct = %{ct | overrides: new_overrides}
+
+    %{
+      book
+      | content_types: new_ct,
+        parts: Map.put(parts, "[Content_Types].xml", ContentTypes.serialize(new_ct))
+    }
+  end
+
+  defp drop_calc_chain_relationship(%__MODULE__{workbook_rels: rels, parts: parts} = book, _path) do
+    new_entries =
+      Enum.reject(rels.entries, &String.ends_with?(&1.target, "calcChain.xml"))
+
+    new_rels = %{rels | entries: new_entries}
+    rels_path = rels_path_for(book.workbook_path)
+
+    %{
+      book
+      | workbook_rels: new_rels,
+        parts: Map.put(parts, rels_path, Relationships.serialize(new_rels))
+    }
+  end
+
+  defp force_full_calc_on_load(%__MODULE__{parts: parts, workbook_path: path} = book) do
+    case Map.fetch(parts, path) do
+      {:ok, xml} ->
+        case WorkbookXml.set_full_calc_on_load(xml) do
+          {:ok, new_xml} -> %{book | parts: Map.put(parts, path, new_xml)}
+          {:error, _} -> book
+        end
+
+      :error ->
+        book
+    end
+  end
+
+  defp rels_path_for(part_path) do
+    dir = Path.dirname(part_path)
+    base = Path.basename(part_path)
+
+    case dir do
+      "." -> "_rels/#{base}.rels"
+      _ -> "#{dir}/_rels/#{base}.rels"
+    end
   end
 
   defp flush_shared_strings(%__MODULE__{shared_strings_dirty: false} = book), do: book

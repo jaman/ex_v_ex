@@ -118,9 +118,13 @@ defmodule ExVEx do
       {encoded, book} = prepare_cell_value(book, value)
 
       with {:ok, new_xml} <- Worksheet.put_cell(xml, coord, encoded) do
-        {:ok, %{book | parts: Map.put(book.parts, path, new_xml)}}
+        {:ok, mark_mutated(book, path, new_xml)}
       end
     end
+  end
+
+  defp mark_mutated(book, path, new_xml) do
+    %{book | parts: Map.put(book.parts, path, new_xml), calc_dirty: true}
   end
 
   defp prepare_cell_value(%Workbook{shared_strings: %SharedStrings{}} = book, value)
@@ -200,7 +204,7 @@ defmodule ExVEx do
          {:ok, xml} <- fetch_part(book.parts, path),
          {:ok, xml} <- handle_overlap(xml, range, on_overlap),
          {:ok, new_xml} <- Worksheet.merge(xml, range, not preserve) do
-      {:ok, %{book | parts: Map.put(book.parts, path, new_xml)}}
+      {:ok, mark_mutated(book, path, new_xml)}
     end
   end
 
@@ -229,7 +233,7 @@ defmodule ExVEx do
   defp apply_unmerge(book, path, xml, range, existing, on_missing) do
     if Enum.any?(existing, &exact_match?(&1, range)) do
       with {:ok, new_xml} <- Worksheet.unmerge(xml, range),
-           do: {:ok, %{book | parts: Map.put(book.parts, path, new_xml)}}
+           do: {:ok, mark_mutated(book, path, new_xml)}
     else
       handle_missing_unmerge(book, on_missing)
     end

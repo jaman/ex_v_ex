@@ -15,6 +15,46 @@ defmodule ExVEx.OOXML.Workbook do
 
   @rels_ns "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
+  @doc """
+  Rewrites `xl/workbook.xml` so that its `<calcPr>` element carries
+  `fullCalcOnLoad="1"` — forcing Excel to recompute every formula on open.
+  Creates a `<calcPr>` element if one isn't present. All other worksheet
+  content is preserved at the element level via Saxy SimpleForm round-trip.
+  """
+  @spec set_full_calc_on_load(binary()) :: {:ok, binary()} | {:error, term()}
+  def set_full_calc_on_load(xml) when is_binary(xml) do
+    case Saxy.SimpleForm.parse_string(xml) do
+      {:ok, {"workbook", attrs, children}} ->
+        tree = {"workbook", attrs, ensure_full_calc(children)}
+        {:ok, Saxy.encode!(tree, version: "1.0", encoding: "UTF-8", standalone: true)}
+
+      {:ok, _other} ->
+        {:error, :not_a_workbook}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp ensure_full_calc(children) do
+    case Enum.find_index(children, &match?({"calcPr", _, _}, &1)) do
+      nil ->
+        children ++ [{"calcPr", [{"fullCalcOnLoad", "1"}], []}]
+
+      idx ->
+        {"calcPr", pr_attrs, pr_children} = Enum.at(children, idx)
+        new_attrs = upsert_attr(pr_attrs, "fullCalcOnLoad", "1")
+        List.replace_at(children, idx, {"calcPr", new_attrs, pr_children})
+    end
+  end
+
+  defp upsert_attr(attrs, name, value) do
+    case List.keyfind(attrs, name, 0) do
+      nil -> attrs ++ [{name, value}]
+      _ -> List.keyreplace(attrs, name, 0, {name, value})
+    end
+  end
+
   @spec parse(binary()) :: {:ok, t()} | {:error, term()}
   def parse(xml) when is_binary(xml) do
     case Saxy.SimpleForm.parse_string(xml) do

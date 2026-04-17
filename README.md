@@ -48,7 +48,7 @@ ExVEx fills that gap in pure Elixir.
 
 **v0.1 — pre-alpha.** Core read/write/round-trip is solid and externally
 validated against [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
-(Rust). 119 tests, zero credo issues, zero compile warnings.
+(Rust). 125 tests, zero credo issues, zero compile warnings.
 
 ### What works
 

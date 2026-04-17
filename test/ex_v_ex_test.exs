@@ -370,6 +370,93 @@ defmodule ExVExTest do
     end
   end
 
+  describe "save invalidates the calc chain so Excel recomputes formulas" do
+    test "drops xl/calcChain.xml from a workbook where it was present" do
+      out = Fixtures.tmp_path("calc_invalidation.xlsm")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("with_macros.xlsm"))
+
+      assert Map.has_key?(book.parts, "xl/calcChain.xml"),
+             "fixture should have a calc chain before we touch it"
+
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "A1", "mutated")
+      :ok = ExVEx.save(book, out)
+
+      {:ok, reopened} = ExVEx.open(out)
+      refute Map.has_key?(reopened.parts, "xl/calcChain.xml")
+    end
+
+    test "removes the calcChain Override from [Content_Types].xml" do
+      out = Fixtures.tmp_path("calc_content_types.xlsm")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("with_macros.xlsm"))
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "A1", "x")
+      :ok = ExVEx.save(book, out)
+
+      {:ok, reopened} = ExVEx.open(out)
+
+      refute Enum.any?(
+               reopened.content_types.overrides,
+               &(&1.part_name == "/xl/calcChain.xml")
+             )
+    end
+
+    test "removes the calcChain relationship from workbook rels" do
+      out = Fixtures.tmp_path("calc_rels.xlsm")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("with_macros.xlsm"))
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "A1", "x")
+      :ok = ExVEx.save(book, out)
+
+      {:ok, reopened} = ExVEx.open(out)
+
+      refute Enum.any?(
+               reopened.workbook_rels.entries,
+               &String.ends_with?(&1.target, "calcChain.xml")
+             )
+    end
+
+    test "sets fullCalcOnLoad=\"1\" on workbook.xml's calcPr" do
+      out = Fixtures.tmp_path("calc_full.xlsx")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "A1", "x")
+      :ok = ExVEx.save(book, out)
+
+      {:ok, reopened} = ExVEx.open(out)
+      workbook_xml = reopened.parts["xl/workbook.xml"]
+      assert workbook_xml =~ ~r/<calcPr[^>]*fullCalcOnLoad="1"/
+    end
+
+    test "no-op save does not disturb the calc chain or workbook.xml" do
+      out = Fixtures.tmp_path("calc_noop.xlsm")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("with_macros.xlsm"))
+      :ok = ExVEx.save(book, out)
+
+      {:ok, reopened} = ExVEx.open(out)
+      assert Map.has_key?(reopened.parts, "xl/calcChain.xml")
+      assert reopened.parts["xl/workbook.xml"] == book.parts["xl/workbook.xml"]
+    end
+
+    test "merge_cells also triggers calc invalidation" do
+      out = Fixtures.tmp_path("calc_merge.xlsx")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
+      {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2")
+      :ok = ExVEx.save(book, out)
+
+      {:ok, reopened} = ExVEx.open(out)
+      assert reopened.parts["xl/workbook.xml"] =~ ~r/fullCalcOnLoad="1"/
+    end
+  end
+
   describe "numeric coordinates: {row, col} tuples are interchangeable with A1" do
     setup do
       {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
