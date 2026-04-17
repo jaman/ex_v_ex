@@ -25,7 +25,7 @@ defmodule ExVEx do
 
   @type path :: Path.t()
   @type sheet_name :: String.t()
-  @type cell_ref :: String.t()
+  @type cell_ref :: String.t() | {pos_integer(), pos_integer()}
   @type cell_value ::
           binary()
           | number()
@@ -344,12 +344,19 @@ defmodule ExVEx do
     end
   end
 
-  defp parse_coordinate(ref) do
+  defp parse_coordinate({row, col})
+       when is_integer(row) and row > 0 and is_integer(col) and col > 0 do
+    {:ok, {row, col}}
+  end
+
+  defp parse_coordinate(ref) when is_binary(ref) do
     case Coordinate.parse(ref) do
       {:ok, coord} -> {:ok, coord}
       :error -> {:error, :invalid_coordinate}
     end
   end
+
+  defp parse_coordinate(_), do: {:error, :invalid_coordinate}
 
   defp fetch_sheet_xml(book, sheet) do
     with {:ok, path} <- sheet_path_or_error(book, sheet) do

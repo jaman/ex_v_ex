@@ -51,9 +51,17 @@ First release. Pre-alpha — API may evolve.
 - Coordinate utilities: `ExVEx.Utils.Coordinate` — A1 ↔ `{row, col}`,
   Excel's bijective base-26 column labels.
 
+### Coordinate addressing
+
+Every cell-addressing function (`get_cell/3`, `put_cell/4`, `get_formula/3`,
+`get_style/3`) accepts either A1-notation (`"B2"`) or a 1-indexed
+`{row, col}` integer tuple (`{2, 2}`). Useful when porting from openpyxl
+or iterating by numeric coordinates. `ExVEx.Utils.Coordinate.to_string/1`
+is also public if you need to convert explicitly.
+
 ### Quality gates
 
-- 115 ExUnit tests, all passing.
+- 119 ExUnit tests, all passing.
 - `mix compile --warnings-as-errors`, `mix format --check-formatted`,
   `mix credo --strict` — all clean.
 - GitHub Actions CI runs the above plus dialyzer on every push / PR.

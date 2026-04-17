@@ -22,6 +22,10 @@ ExVEx.get_style(book, "Sheet1", "A1")             #=> {:ok, %ExVEx.Style{...}}
 {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D4", ~D[2024-06-01])
 {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D5", {:formula, "=SUM(A1:A10)"})
 
+# Coordinates accept both A1 refs and {row, col} integer tuples
+ExVEx.get_cell(book, "Sheet1", {2, 3})            #=> same as ExVEx.get_cell(book, "Sheet1", "C2")
+{:ok, book} = ExVEx.put_cell(book, "Sheet1", {10, 5}, "tuple write")
+
 # Merge / unmerge
 {:ok, book} = ExVEx.merge_cells(book, "Sheet1", "A1:B2")
 {:ok, ["A1:B2"]} = ExVEx.merged_ranges(book, "Sheet1")
@@ -44,7 +48,7 @@ ExVEx fills that gap in pure Elixir.
 
 **v0.1 — pre-alpha.** Core read/write/round-trip is solid and externally
 validated against [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
-(Rust). 115 tests, zero credo issues, zero compile warnings.
+(Rust). 119 tests, zero credo issues, zero compile warnings.
 
 ### What works
 

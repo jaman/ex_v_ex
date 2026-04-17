@@ -370,6 +370,41 @@ defmodule ExVExTest do
     end
   end
 
+  describe "numeric coordinates: {row, col} tuples are interchangeable with A1" do
+    setup do
+      {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
+      out = Fixtures.tmp_path("tuples.xlsx")
+      on_exit(fn -> File.rm(out) end)
+      %{book: book, out: out}
+    end
+
+    test "get_cell accepts {row, col}", %{book: book} do
+      assert ExVEx.get_cell(book, "Sheet1", {1, 1}) == {:ok, "A1"}
+      assert ExVEx.get_cell(book, "Sheet1", {1, 1}) == ExVEx.get_cell(book, "Sheet1", "A1")
+    end
+
+    test "put_cell accepts {row, col}", %{book: book, out: out} do
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", {10, 5}, "tuple write")
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert {:ok, "tuple write"} = ExVEx.get_cell(reopened, "Sheet1", "E10")
+      assert {:ok, "tuple write"} = ExVEx.get_cell(reopened, "Sheet1", {10, 5})
+    end
+
+    test "get_formula and get_style accept {row, col}", %{book: book} do
+      assert {:ok, nil} = ExVEx.get_formula(book, "Sheet1", {1, 1})
+      assert {:ok, %ExVEx.Style{}} = ExVEx.get_style(book, "Sheet1", {1, 1})
+    end
+
+    test "invalid tuples return :invalid_coordinate", %{book: book} do
+      assert {:error, :invalid_coordinate} = ExVEx.get_cell(book, "Sheet1", {0, 1})
+      assert {:error, :invalid_coordinate} = ExVEx.get_cell(book, "Sheet1", {1, 0})
+      assert {:error, :invalid_coordinate} = ExVEx.get_cell(book, "Sheet1", {-1, 1})
+    end
+  end
+
   describe "get_style/3" do
     setup do
       {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
