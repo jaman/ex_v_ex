@@ -251,6 +251,166 @@ defmodule ExVExTest do
     end
   end
 
+  describe "put_cell with Date / NaiveDateTime" do
+    test "writes a Date and reads it back identically" do
+      out = Fixtures.tmp_path("date_write.xlsx")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D1", ~D[2024-01-15])
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D2", ~D[2000-02-29])
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert ExVEx.get_cell(reopened, "Sheet1", "D1") == {:ok, ~D[2024-01-15]}
+      assert ExVEx.get_cell(reopened, "Sheet1", "D2") == {:ok, ~D[2000-02-29]}
+    end
+
+    test "writes a NaiveDateTime and reads it back identically" do
+      out = Fixtures.tmp_path("datetime_write.xlsx")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D1", ~N[2024-01-15 12:00:00])
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert {:ok, value} = ExVEx.get_cell(reopened, "Sheet1", "D1")
+      assert NaiveDateTime.to_date(value) == ~D[2024-01-15]
+      assert value.hour == 12
+      assert value.minute == 0
+    end
+
+    test "untouched content still round-trips when date write mutates styles.xml" do
+      out = Fixtures.tmp_path("date_preserves.xlsx")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
+
+      source_sheet2 = book.parts["xl/worksheets/sheet2.xml"]
+
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D1", ~D[2024-06-01])
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert reopened.parts["xl/worksheets/sheet2.xml"] == source_sheet2
+      assert ExVEx.get_cell(reopened, "Sheet1", "A1") == {:ok, "A1"}
+    end
+  end
+
+  describe "put_cell with strings uses the shared-string table" do
+    test "a repeated string value produces only one entry in sharedStrings.xml" do
+      out = Fixtures.tmp_path("sst_dedup.xlsx")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D1", "hello world")
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D2", "hello world")
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D3", "hello world")
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert ExVEx.get_cell(reopened, "Sheet1", "D1") == {:ok, "hello world"}
+      assert ExVEx.get_cell(reopened, "Sheet1", "D2") == {:ok, "hello world"}
+      assert ExVEx.get_cell(reopened, "Sheet1", "D3") == {:ok, "hello world"}
+
+      sst_xml = reopened.parts["xl/sharedStrings.xml"]
+
+      occurrences =
+        sst_xml
+        |> String.split("<si>")
+        |> Enum.count(&String.contains?(&1, "hello world"))
+
+      assert occurrences == 1,
+             "expected 'hello world' to appear exactly once in sharedStrings.xml"
+    end
+
+    test "reuses an existing shared string entry when the text already appears" do
+      out = Fixtures.tmp_path("sst_reuse.xlsx")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
+
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "Z1", "A1")
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert ExVEx.get_cell(reopened, "Sheet1", "Z1") == {:ok, "A1"}
+
+      sst_xml = reopened.parts["xl/sharedStrings.xml"]
+
+      a1_count =
+        sst_xml
+        |> String.split("<si>")
+        |> Enum.count(&String.match?(&1, ~r/<t[^>]*>A1<\/t>/))
+
+      assert a1_count == 1, "'A1' already existed in the SST and should not be duplicated"
+    end
+
+    test "falls back to inline strings when the workbook has no SST" do
+      out = Fixtures.tmp_path("no_sst.xlsx")
+      on_exit(fn -> File.rm(out) end)
+
+      {:ok, book} = ExVEx.open(Fixtures.path("empty.xlsx"))
+      refute book.shared_strings
+
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "A1", "inline me")
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert ExVEx.get_cell(reopened, "Sheet1", "A1") == {:ok, "inline me"}
+
+      sheet_xml = reopened.parts["xl/worksheets/sheet1.xml"]
+      assert sheet_xml =~ ~s(t="inlineStr")
+    end
+  end
+
+  describe "get_style/3" do
+    setup do
+      {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
+      %{book: book}
+    end
+
+    test "returns a default style for an unstyled cell", %{book: book} do
+      assert {:ok, %ExVEx.Style{} = style} = ExVEx.get_style(book, "Sheet1", "A1")
+      assert style.font.bold == false
+      assert style.font.italic == false
+      assert style.number_format == "General"
+    end
+
+    test "extracts font colour from a styled cell", %{book: book} do
+      assert {:ok, %ExVEx.Style{font: font}} = ExVEx.get_style(book, "Sheet1", "B2")
+      assert font.color.kind == :rgb
+      assert font.color.value == "FFFF0000"
+    end
+
+    test "extracts border info from a bordered cell", %{book: book} do
+      assert {:ok, %ExVEx.Style{border: border}} = ExVEx.get_style(book, "Sheet1", "C3")
+      assert border.top.style == :thin
+      assert border.bottom.style == :thin
+      assert border.left.style == :thin
+      assert border.right.style == :thin
+    end
+
+    test "extracts wrap-text alignment", %{book: book} do
+      assert {:ok, %ExVEx.Style{alignment: alignment}} = ExVEx.get_style(book, "Sheet1", "C1")
+      assert alignment.wrap_text == true
+    end
+
+    test "returns default style for empty cells", %{book: book} do
+      assert {:ok, %ExVEx.Style{}} = ExVEx.get_style(book, "Sheet1", "Z99")
+    end
+
+    test "returns :error for an unknown sheet", %{book: book} do
+      assert {:error, :unknown_sheet} = ExVEx.get_style(book, "Ghost", "A1")
+    end
+  end
+
   describe "multi-sheet writes" do
     test "put_cell can target multiple sheets in sequence and all survive save" do
       out = Fixtures.tmp_path("multi_sheet.xlsx")

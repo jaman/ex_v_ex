@@ -167,6 +167,13 @@ defmodule ExVEx.OOXML.Worksheet do
 
   defp cell_element(_coord, nil, _carry), do: nil
 
+  defp cell_element(coord, {:styled, inner, style_id}, carry)
+       when is_integer(style_id) and style_id >= 0 do
+    style_attr = {"s", Integer.to_string(style_id)}
+    carry_without_s = Enum.reject(carry, fn {name, _} -> name == "s" end)
+    cell_element(coord, inner, [style_attr | carry_without_s])
+  end
+
   defp cell_element(coord, {:formula, formula}, carry) when is_binary(formula) do
     attrs = [{"r", Coordinate.to_string(coord)} | carry]
     {"c", attrs, [{"f", [], [formula]}]}
@@ -181,6 +188,12 @@ defmodule ExVEx.OOXML.Worksheet do
        {"f", [], [formula]},
        {"v", [], [cached_to_string(cached)]}
      ]}
+  end
+
+  defp cell_element(coord, {:shared_string, index}, carry)
+       when is_integer(index) and index >= 0 do
+    attrs = [{"r", Coordinate.to_string(coord)} | carry] ++ [{"t", "s"}]
+    {"c", attrs, [{"v", [], [Integer.to_string(index)]}]}
   end
 
   defp cell_element(coord, value, carry) when is_binary(value) do

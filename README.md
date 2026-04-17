@@ -12,12 +12,15 @@ ExVEx.sheet_names(book)                           #=> ["Sheet1", "Sheet2"]
 ExVEx.get_cell(book, "Sheet1", "A1")              #=> {:ok, "widget"}
 ExVEx.get_cell(book, "Sheet1", "B2")              #=> {:ok, 42}
 ExVEx.get_cell(book, "Sheet1", "C3")              #=> {:ok, ~D[2024-01-15]}
+ExVEx.get_formula(book, "Sheet1", "D4")           #=> {:ok, "=SUM(B2:B10)"}
+ExVEx.get_style(book, "Sheet1", "A1")             #=> {:ok, %ExVEx.Style{...}}
 
 # Write
 {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D1", "Updated")
 {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D2", 3.14)
 {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D3", true)
-{:ok, book} = ExVEx.put_cell(book, "Sheet1", "D4", {:formula, "=SUM(A1:A10)"})
+{:ok, book} = ExVEx.put_cell(book, "Sheet1", "D4", ~D[2024-06-01])
+{:ok, book} = ExVEx.put_cell(book, "Sheet1", "D5", {:formula, "=SUM(A1:A10)"})
 
 # Save
 :ok = ExVEx.save(book, "inventory.xlsx")
@@ -37,8 +40,7 @@ ExVEx fills that gap in pure Elixir.
 
 **v0.1 — pre-alpha.** Core read/write/round-trip is solid and externally
 validated against [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
-(Rust). See [CHANGELOG.md](CHANGELOG.md) for what works today and what's
-next.
+(Rust). 90 tests, zero credo issues, zero compile warnings.
 
 ### What works
 
@@ -47,20 +49,19 @@ next.
   macros all pass through byte-for-byte)
 - Read cell values: strings (shared + inline), numbers, booleans, dates,
   date-times, formula results, cell errors
-- Write cell values: strings, numbers, booleans, `nil` (clear), formulas
-  (with or without cached value)
+- Read cell styles: font, fill, border, alignment, number format
+- Write cell values: strings (through the SST with automatic dedup),
+  numbers, booleans, `nil` (clear), `Date`, `NaiveDateTime`, formulas (with
+  or without cached value)
 - Sheet navigation: `sheet_names/1`, `sheet_path/2`
 - Bulk reads: `cells/2` (map), `each_cell/2` (stream in row-major order)
 - Get cell formula: `get_formula/3`
 
 ### Not yet
 
-- Writing `Date` / `NaiveDateTime` values directly (requires styles.xml mutation)
-- Writing through the shared strings table (current writes use inline strings)
-- Cell style reads (font, fill, border, alignment)
-- Style mutation
-- Row/column insertion, merged cells, defined names, charts, images, pivot
-  tables, comments
+- Style mutation (set bold, change font, etc.)
+- Row/column insertion, merged cells, defined names
+- Charts, images, pivot tables, comments
 
 ## Installation
 
@@ -79,9 +80,10 @@ Three commitments drive the design:
 2. **Immutable functional API.** Every mutating operation returns a new
    `%ExVEx.Workbook{}`. No GenServers, no mutable references.
 3. **Preserve over re-serialize.** When a part is mutated (a worksheet with
-   a written cell), ExVEx surgically edits just the changed sub-tree and
-   leaves the surrounding XML alone — namespaces, unknown attributes, and
-   extension elements survive.
+   a written cell; the styles.xml when a date write adds an xf; the
+   sharedStrings.xml when a new string is interned), ExVEx surgically edits
+   just the changed sub-tree and leaves the surrounding XML alone —
+   namespaces, unknown attributes, and extension elements survive.
 
 This is the same strategy used by [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
 (Rust), and stronger than [edit-xlsx](https://crates.io/crates/edit-xlsx)'s

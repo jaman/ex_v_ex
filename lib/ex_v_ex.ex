@@ -53,8 +53,9 @@ defmodule ExVEx do
          workbook_rels_path = rels_path_for(workbook_path),
          {:ok, workbook_rels_xml} <- fetch_part(parts, workbook_rels_path),
          {:ok, workbook_rels} <- Relationships.parse(workbook_rels_xml),
-         {:ok, shared_strings} <- maybe_load_shared_strings(parts, workbook_rels, workbook_path),
-         {:ok, styles} <- maybe_load_styles(parts, workbook_rels, workbook_path) do
+         {:ok, shared_strings, sst_path} <-
+           maybe_load_shared_strings(parts, workbook_rels, workbook_path),
+         {:ok, styles, styles_path} <- maybe_load_styles(parts, workbook_rels, workbook_path) do
       {:ok,
        %Workbook{
          parts: parts,
@@ -64,7 +65,9 @@ defmodule ExVEx do
          workbook_rels: workbook_rels,
          workbook_path: workbook_path,
          shared_strings: shared_strings,
+         shared_strings_path: sst_path,
          styles: styles,
+         styles_path: styles_path,
          source_path: path
        }}
     end
@@ -72,8 +75,10 @@ defmodule ExVEx do
 
   @spec save(Workbook.t(), path()) :: :ok | {:error, term()}
   def save(%Workbook{} = book, path) do
-    entries = Workbook.to_entries(book)
-    Zip.write(path, entries)
+    book
+    |> Workbook.flush()
+    |> Workbook.to_entries()
+    |> then(&Zip.write(path, &1))
   end
 
   @spec sheet_names(Workbook.t()) :: [sheet_name()]
@@ -109,9 +114,61 @@ defmodule ExVEx do
   def put_cell(%Workbook{} = book, sheet, ref, value) do
     with {:ok, coord} <- parse_coordinate(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, xml} <- fetch_part(book.parts, path),
-         {:ok, new_xml} <- Worksheet.put_cell(xml, coord, value) do
-      {:ok, %{book | parts: Map.put(book.parts, path, new_xml)}}
+         {:ok, xml} <- fetch_part(book.parts, path) do
+      {encoded, book} = prepare_cell_value(book, value)
+
+      with {:ok, new_xml} <- Worksheet.put_cell(xml, coord, encoded) do
+        {:ok, %{book | parts: Map.put(book.parts, path, new_xml)}}
+      end
+    end
+  end
+
+  defp prepare_cell_value(%Workbook{shared_strings: %SharedStrings{}} = book, value)
+       when is_binary(value) do
+    {index, sst} = SharedStrings.intern(book.shared_strings, value)
+    {{:shared_string, index}, %{book | shared_strings: sst, shared_strings_dirty: true}}
+  end
+
+  defp prepare_cell_value(book, %Date{} = date) do
+    prepare_styled_serial(book, Date.to_gregorian_days(date) - gregorian_epoch(), 14)
+  end
+
+  defp prepare_cell_value(book, %NaiveDateTime{} = dt) do
+    days = Date.to_gregorian_days(NaiveDateTime.to_date(dt)) - gregorian_epoch()
+    {hours, minutes, seconds} = {dt.hour, dt.minute, dt.second}
+    fraction = (hours * 3600 + minutes * 60 + seconds) / 86_400
+    prepare_styled_serial(book, days + fraction, 22)
+  end
+
+  defp prepare_cell_value(book, value), do: {value, book}
+
+  defp prepare_styled_serial(book, serial, num_fmt_id) do
+    styles = book.styles || %Styles{}
+    {style_id, styles} = Styles.upsert_date_format(styles, num_fmt_id)
+
+    book = %{book | styles: styles, styles_dirty: true, styles_path: styles_path(book)}
+
+    {{:styled, serial, style_id}, book}
+  end
+
+  defp styles_path(%Workbook{styles_path: path}) when is_binary(path), do: path
+  defp styles_path(_), do: "xl/styles.xml"
+
+  defp gregorian_epoch, do: Date.to_gregorian_days(~D[1899-12-30])
+
+  @spec get_style(Workbook.t(), sheet_name(), cell_ref()) ::
+          {:ok, ExVEx.Style.t()} | {:error, term()}
+  def get_style(%Workbook{} = book, sheet, ref) do
+    with {:ok, coord} <- parse_coordinate(ref),
+         {:ok, sheet_xml} <- fetch_sheet_xml(book, sheet),
+         {:ok, worksheet} <- Worksheet.parse(sheet_xml) do
+      style_id =
+        case Map.fetch(worksheet.cells, coord) do
+          {:ok, %{style_id: id}} -> id
+          :error -> nil
+        end
+
+      {:ok, Styles.resolve(book.styles || %Styles{}, style_id)}
     end
   end
 
@@ -236,29 +293,7 @@ defmodule ExVEx do
     end
   end
 
-  defp date_format_code(%Styles{num_fmts: num_fmts}, %{num_fmt_id: id}) do
-    case Enum.find(num_fmts, &(&1.id == id)) do
-      %{format_code: code} -> code
-      nil -> builtin_format_code(id)
-    end
-  end
-
-  @builtin_date_codes %{
-    14 => "m/d/yyyy",
-    15 => "d-mmm-yy",
-    16 => "d-mmm",
-    17 => "mmm-yy",
-    18 => "h:mm AM/PM",
-    19 => "h:mm:ss AM/PM",
-    20 => "h:mm",
-    21 => "h:mm:ss",
-    22 => "m/d/yyyy h:mm",
-    45 => "mm:ss",
-    46 => "[h]:mm:ss",
-    47 => "mm:ss.0"
-  }
-
-  defp builtin_format_code(id), do: Map.get(@builtin_date_codes, id, "")
+  defp date_format_code(%Styles{} = styles, %{num_fmt_id: id}), do: Styles.format_code(styles, id)
 
   defp serial_to_temporal(number, format_code) do
     if time_bearing_code?(format_code) do
@@ -352,16 +387,17 @@ defmodule ExVEx do
          parser
        ) do
     case Enum.find(entries, &(&1.type == type)) do
-      nil ->
-        {:ok, nil}
+      nil -> {:ok, nil, nil}
+      rel -> load_found_part(parts, rel, workbook_path, parser)
+    end
+  end
 
-      rel ->
-        path = Relationships.resolve(rel, rels_path_for(workbook_path))
+  defp load_found_part(parts, rel, workbook_path, parser) do
+    path = Relationships.resolve(rel, rels_path_for(workbook_path))
 
-        case Map.fetch(parts, path) do
-          {:ok, xml} -> parser.(xml)
-          :error -> {:ok, nil}
-        end
+    case Map.fetch(parts, path) do
+      {:ok, xml} -> with {:ok, parsed} <- parser.(xml), do: {:ok, parsed, path}
+      :error -> {:ok, nil, nil}
     end
   end
 

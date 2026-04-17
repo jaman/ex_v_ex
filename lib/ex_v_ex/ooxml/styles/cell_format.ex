@@ -4,13 +4,21 @@ defmodule ExVEx.OOXML.Styles.CellFormat do
   the `s` attribute (`<c r="A1" s="3"/>` → `cell_formats[3]`).
   """
 
-  defstruct num_fmt_id: 0, font_id: 0, fill_id: 0, border_id: 0, xf_id: 0
+  alias ExVEx.OOXML.Styles.AlignmentRecord
+
+  defstruct num_fmt_id: 0,
+            font_id: 0,
+            fill_id: 0,
+            border_id: 0,
+            xf_id: 0,
+            alignment: nil
 
   @type t :: %__MODULE__{
           num_fmt_id: non_neg_integer(),
           font_id: non_neg_integer(),
           fill_id: non_neg_integer(),
           border_id: non_neg_integer(),
-          xf_id: non_neg_integer()
+          xf_id: non_neg_integer(),
+          alignment: AlignmentRecord.t() | nil
         }
 end
