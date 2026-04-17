@@ -31,8 +31,7 @@ ExVEx.get_style(book, "Sheet1", "A1")             #=> {:ok, %ExVEx.Style{...}}
 The Elixir ecosystem has `Elixlsx` (write-only) and `xlsx_reader` (read-only),
 but no first-class story for *editing existing* spreadsheets. Every team that
 needs this today reaches for Python (`openpyxl`) or a Rust NIF — which drags
-a second runtime into the deployment. For one team, adding Python inflated a
-50 MB release to 900 MB.
+a second runtime into the deployment.
 
 ExVEx fills that gap in pure Elixir.
 
