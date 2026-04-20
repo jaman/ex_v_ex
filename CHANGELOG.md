@@ -6,6 +6,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (workbook creation)
+
+ExVEx is now a complete xlsx library — it can create workbooks from scratch,
+not just edit existing ones. No Python or Rust dependency needed for
+template generation.
+
+- `ExVEx.new/0` — returns a minimal blank workbook with a single empty
+  sheet named `"Sheet1"`. No fixture file needed; the skeleton parts are
+  embedded in the library.
+- `ExVEx.add_sheet(book, name)` — appends a new empty sheet.
+  `{:error, :duplicate_sheet_name}` if the name is already in use.
+- `ExVEx.rename_sheet(book, old, new)` — changes a sheet's name in place.
+  `{:error, :unknown_sheet}` or `{:error, :duplicate_sheet_name}` as
+  appropriate. Same-name is a no-op.
+- `ExVEx.remove_sheet(book, name)` — drops a sheet and its worksheet part,
+  plus the matching Content Types Override and workbook relationship.
+  `{:error, :last_sheet}` guards against producing an invalid
+  zero-sheet workbook.
+
+All four coordinate `workbook.xml`, `workbook.xml.rels`, and
+`[Content_Types].xml` together on every change. A new
+`OOXML.Workbook.serialize_into/2` rewrites the `<sheets>` section while
+preserving surrounding elements at the SimpleForm level.
+
+Example — build a multi-sheet template from zero:
+
+    {:ok, book} = ExVEx.new()
+    {:ok, book} = ExVEx.rename_sheet(book, "Sheet1", "Summary")
+    {:ok, book} = ExVEx.add_sheet(book, "Data")
+    {:ok, book} = ExVEx.add_sheet(book, "Formulas")
+    {:ok, book} = ExVEx.put_cell(book, "Data", "A1", "alpha")
+    {:ok, book} = ExVEx.put_cell(book, "Formulas", "A1", {:formula, "=SUM(Data!A1:A10)"})
+    :ok = ExVEx.save(book, "template.xlsx")
+
 ### Changed (performance)
 
 Bulk writes are now ~20× faster with ~60× less memory churn.

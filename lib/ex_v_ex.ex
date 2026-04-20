@@ -41,9 +41,43 @@ defmodule ExVEx do
 
   @spec open(path()) :: {:ok, Workbook.t()} | {:error, term()}
   def open(path) do
-    with {:ok, entries} <- Zip.read(path),
-         parts = entries_to_parts(entries),
-         {:ok, manifest_xml} <- fetch_part(parts, "[Content_Types].xml"),
+    with {:ok, entries} <- Zip.read(path) do
+      parts = entries_to_parts(entries)
+      part_order = Enum.map(entries, & &1.path)
+      build_workbook(parts, part_order, path)
+    end
+  end
+
+  @doc """
+  Returns a minimal blank workbook with a single empty sheet named
+  `"Sheet1"`. Compose with `add_sheet/2`, `rename_sheet/3`,
+  `remove_sheet/2`, and `put_cell/4` to build a template from scratch.
+  """
+  @spec new() :: {:ok, Workbook.t()} | {:error, term()}
+  def new do
+    parts = %{
+      "[Content_Types].xml" => blank_content_types(),
+      "_rels/.rels" => blank_package_rels(),
+      "xl/workbook.xml" => blank_workbook(),
+      "xl/_rels/workbook.xml.rels" => blank_workbook_rels(),
+      "xl/worksheets/sheet1.xml" => blank_sheet(),
+      "xl/styles.xml" => blank_styles()
+    }
+
+    part_order = [
+      "[Content_Types].xml",
+      "_rels/.rels",
+      "xl/workbook.xml",
+      "xl/_rels/workbook.xml.rels",
+      "xl/worksheets/sheet1.xml",
+      "xl/styles.xml"
+    ]
+
+    build_workbook(parts, part_order, nil)
+  end
+
+  defp build_workbook(parts, part_order, source_path) do
+    with {:ok, manifest_xml} <- fetch_part(parts, "[Content_Types].xml"),
          {:ok, content_types} <- ContentTypes.parse(manifest_xml),
          {:ok, package_rels_xml} <- fetch_part(parts, @package_rels_path),
          {:ok, package_rels} <- Relationships.parse(package_rels_xml),
@@ -60,7 +94,7 @@ defmodule ExVEx do
       {:ok,
        %Workbook{
          parts: parts,
-         part_order: Enum.map(entries, & &1.path),
+         part_order: part_order,
          content_types: content_types,
          workbook: workbook,
          workbook_rels: workbook_rels,
@@ -69,9 +103,33 @@ defmodule ExVEx do
          shared_strings_path: sst_path,
          styles: styles,
          styles_path: styles_path,
-         source_path: path
+         source_path: source_path
        }}
     end
+  end
+
+  defp blank_content_types do
+    ~s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>|
+  end
+
+  defp blank_package_rels do
+    ~s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>|
+  end
+
+  defp blank_workbook do
+    ~s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>|
+  end
+
+  defp blank_workbook_rels do
+    ~s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>|
+  end
+
+  defp blank_sheet do
+    ~s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/></worksheet>|
+  end
+
+  defp blank_styles do
+    ~s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>|
   end
 
   @spec save(Workbook.t(), path()) :: :ok | {:error, term()}
@@ -85,6 +143,199 @@ defmodule ExVEx do
   @spec sheet_names(Workbook.t()) :: [sheet_name()]
   def sheet_names(%Workbook{workbook: %WorkbookXml{sheets: sheets}}) do
     Enum.map(sheets, & &1.name)
+  end
+
+  @worksheet_content_type "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+  @worksheet_rel_type "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+
+  @doc """
+  Appends a new empty sheet with the given name to the workbook.
+
+  Returns `{:error, :duplicate_sheet_name}` if the name is already in use.
+  """
+  @spec add_sheet(Workbook.t(), sheet_name()) :: {:ok, Workbook.t()} | {:error, term()}
+  def add_sheet(%Workbook{} = book, name) when is_binary(name) do
+    if sheet_exists?(book, name) do
+      {:error, :duplicate_sheet_name}
+    else
+      {:ok, do_add_sheet(book, name)}
+    end
+  end
+
+  defp do_add_sheet(book, name) do
+    sheet_number = next_sheet_number(book)
+    rel_id = next_rel_id(book.workbook_rels)
+    sheet_path = "xl/worksheets/sheet#{sheet_number}.xml"
+
+    new_sheet = %WorkbookXml.SheetRef{
+      name: name,
+      sheet_id: next_sheet_id(book),
+      rel_id: rel_id,
+      state: :visible
+    }
+
+    new_relationship = %Relationships.Relationship{
+      id: rel_id,
+      type: @worksheet_rel_type,
+      target: "worksheets/sheet#{sheet_number}.xml"
+    }
+
+    new_override = %ContentTypes.Override{
+      part_name: "/#{sheet_path}",
+      content_type: @worksheet_content_type
+    }
+
+    book
+    |> put_in(
+      [Access.key(:workbook), Access.key(:sheets)],
+      book.workbook.sheets ++ [new_sheet]
+    )
+    |> put_in(
+      [Access.key(:workbook_rels), Access.key(:entries)],
+      book.workbook_rels.entries ++ [new_relationship]
+    )
+    |> put_in(
+      [Access.key(:content_types), Access.key(:overrides)],
+      book.content_types.overrides ++ [new_override]
+    )
+    |> Map.update!(:parts, &Map.put(&1, sheet_path, blank_sheet()))
+    |> Map.update!(:part_order, &(&1 ++ [sheet_path]))
+    |> flush_package_metadata()
+    |> Map.put(:calc_dirty, true)
+  end
+
+  @doc "Renames a sheet. Returns `{:error, :unknown_sheet}` if `old` is not found."
+  @spec rename_sheet(Workbook.t(), sheet_name(), sheet_name()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def rename_sheet(%Workbook{} = book, old, new) when is_binary(old) and is_binary(new) do
+    cond do
+      not sheet_exists?(book, old) ->
+        {:error, :unknown_sheet}
+
+      old == new ->
+        {:ok, book}
+
+      sheet_exists?(book, new) ->
+        {:error, :duplicate_sheet_name}
+
+      true ->
+        new_sheets =
+          Enum.map(book.workbook.sheets, fn
+            %{name: ^old} = s -> %{s | name: new}
+            s -> s
+          end)
+
+        book =
+          book
+          |> put_in([Access.key(:workbook), Access.key(:sheets)], new_sheets)
+          |> flush_package_metadata()
+          |> Map.put(:calc_dirty, true)
+
+        {:ok, book}
+    end
+  end
+
+  @doc """
+  Removes a sheet and its worksheet part from the workbook.
+
+  Returns `{:error, :unknown_sheet}` if the name is not found, or
+  `{:error, :last_sheet}` if removing it would leave the workbook with
+  zero sheets (invalid per the OOXML spec).
+  """
+  @spec remove_sheet(Workbook.t(), sheet_name()) :: {:ok, Workbook.t()} | {:error, term()}
+  def remove_sheet(%Workbook{} = book, name) when is_binary(name) do
+    cond do
+      not sheet_exists?(book, name) ->
+        {:error, :unknown_sheet}
+
+      length(book.workbook.sheets) == 1 ->
+        {:error, :last_sheet}
+
+      true ->
+        sheet_ref = Enum.find(book.workbook.sheets, &(&1.name == name))
+        {:ok, path} = sheet_path(book, name)
+
+        new_sheets = Enum.reject(book.workbook.sheets, &(&1.name == name))
+
+        new_rels =
+          Enum.reject(book.workbook_rels.entries, &(&1.id == sheet_ref.rel_id))
+
+        new_overrides =
+          Enum.reject(book.content_types.overrides, &(&1.part_name == "/" <> path))
+
+        book =
+          book
+          |> put_in([Access.key(:workbook), Access.key(:sheets)], new_sheets)
+          |> put_in([Access.key(:workbook_rels), Access.key(:entries)], new_rels)
+          |> put_in([Access.key(:content_types), Access.key(:overrides)], new_overrides)
+          |> Map.update!(:parts, &Map.delete(&1, path))
+          |> Map.update!(:part_order, &Enum.reject(&1, fn p -> p == path end))
+          |> Map.update!(:sheet_trees, &Map.delete(&1, path))
+          |> Map.update!(:dirty_sheet_paths, &MapSet.delete(&1, path))
+          |> flush_package_metadata()
+          |> Map.put(:calc_dirty, true)
+
+        {:ok, book}
+    end
+  end
+
+  defp sheet_exists?(%Workbook{workbook: %{sheets: sheets}}, name) do
+    Enum.any?(sheets, &(&1.name == name))
+  end
+
+  defp next_sheet_number(%Workbook{parts: parts}) do
+    existing =
+      parts
+      |> Map.keys()
+      |> Enum.flat_map(fn
+        "xl/worksheets/sheet" <> rest ->
+          case Integer.parse(rest) do
+            {n, ".xml"} -> [n]
+            _ -> []
+          end
+
+        _ ->
+          []
+      end)
+
+    (Enum.max([0 | existing]) + 1) |> max(1)
+  end
+
+  defp next_sheet_id(%Workbook{workbook: %{sheets: sheets}}) do
+    sheets |> Enum.map(& &1.sheet_id) |> Enum.max(fn -> 0 end) |> Kernel.+(1)
+  end
+
+  defp next_rel_id(%Relationships{entries: entries}) do
+    max_n = entries |> Enum.flat_map(&parse_rel_id_number/1) |> Enum.max(fn -> 0 end)
+    "rId#{max_n + 1}"
+  end
+
+  defp parse_rel_id_number(%Relationships.Relationship{id: "rId" <> rest}) do
+    case Integer.parse(rest) do
+      {n, ""} -> [n]
+      _ -> []
+    end
+  end
+
+  defp parse_rel_id_number(_), do: []
+
+  defp flush_package_metadata(%Workbook{} = book) do
+    workbook_xml =
+      WorkbookXml.serialize_into(book.workbook, Map.fetch!(book.parts, book.workbook_path))
+
+    rels_xml = Relationships.serialize(book.workbook_rels)
+    rels_path = rels_path_for(book.workbook_path)
+
+    ct_xml = ContentTypes.serialize(book.content_types)
+
+    %{
+      book
+      | parts:
+          book.parts
+          |> Map.put(book.workbook_path, workbook_xml)
+          |> Map.put(rels_path, rels_xml)
+          |> Map.put("[Content_Types].xml", ct_xml)
+    }
   end
 
   @spec sheet_path(Workbook.t(), sheet_name()) :: {:ok, String.t()} | :error

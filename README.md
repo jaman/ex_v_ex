@@ -5,6 +5,14 @@
 NIFs, no second runtime in your deployment.
 
 ```elixir
+# Create from scratch
+{:ok, book} = ExVEx.new()
+{:ok, book} = ExVEx.rename_sheet(book, "Sheet1", "Summary")
+{:ok, book} = ExVEx.add_sheet(book, "Data")
+{:ok, book} = ExVEx.put_cell(book, "Data", "A1", "alpha")
+:ok = ExVEx.save(book, "new.xlsx")
+
+# Or open an existing workbook
 {:ok, book} = ExVEx.open("inventory.xlsx")
 
 # Read
@@ -52,6 +60,8 @@ validated against [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
 
 ### What works
 
+- **Create** new `.xlsx` workbooks from scratch (`new/0`, `add_sheet/2`,
+  `rename_sheet/3`, `remove_sheet/2`)
 - Open `.xlsx` and `.xlsm` files
 - Round-trip identity on untouched content (unknown XML, custom parts, VBA
   macros all pass through byte-for-byte)

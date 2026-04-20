@@ -55,6 +55,63 @@ defmodule ExVEx.OOXML.Workbook do
     end
   end
 
+  @doc """
+  Rewrites the `<sheets>` section of `xl/workbook.xml` using the sheet list
+  from `workbook`, preserving all other elements at the element level.
+  """
+  @spec serialize_into(t(), binary()) :: binary()
+  def serialize_into(%__MODULE__{sheets: sheets}, original_xml) when is_binary(original_xml) do
+    case Saxy.SimpleForm.parse_string(original_xml) do
+      {:ok, {"workbook", attrs, children}} ->
+        new_children = replace_sheets(children, sheets)
+        tree = {"workbook", attrs, new_children}
+        Saxy.encode!(tree, version: "1.0", encoding: "UTF-8", standalone: true)
+
+      _ ->
+        original_xml
+    end
+  end
+
+  defp replace_sheets(children, sheets) do
+    new_section = sheets_element(sheets)
+
+    case Enum.find_index(children, &match?({"sheets", _, _}, &1)) do
+      nil -> insert_sheets_element(children, new_section)
+      idx -> List.replace_at(children, idx, new_section)
+    end
+  end
+
+  defp sheets_element(sheets) do
+    {"sheets", [], Enum.map(sheets, &sheet_element/1)}
+  end
+
+  defp sheet_element(%SheetRef{name: name, sheet_id: id, rel_id: rel_id, state: state}) do
+    attrs =
+      [
+        {"name", name},
+        {"sheetId", Integer.to_string(id)},
+        {"r:id", rel_id}
+      ] ++ state_attrs(state)
+
+    {"sheet", attrs, []}
+  end
+
+  defp state_attrs(:hidden), do: [{"state", "hidden"}]
+  defp state_attrs(:very_hidden), do: [{"state", "veryHidden"}]
+  defp state_attrs(_), do: []
+
+  defp insert_sheets_element(children, new_section) do
+    idx =
+      Enum.find_index(children, fn
+        {"calcPr", _, _} -> true
+        {"definedNames", _, _} -> true
+        {"workbookProtection", _, _} -> true
+        _ -> false
+      end) || length(children)
+
+    List.insert_at(children, idx, new_section)
+  end
+
   @spec parse(binary()) :: {:ok, t()} | {:error, term()}
   def parse(xml) when is_binary(xml) do
     case Saxy.SimpleForm.parse_string(xml) do
