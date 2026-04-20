@@ -13,7 +13,7 @@ defmodule ExVEx.Workbook do
   without exhaustively modelling every OOXML schema.
   """
 
-  alias ExVEx.OOXML.{SharedStrings, Styles}
+  alias ExVEx.OOXML.{SharedStrings, Styles, Worksheet}
   alias ExVEx.OOXML.Workbook, as: WorkbookXml
   alias ExVEx.Packaging.ContentTypes
   alias ExVEx.Packaging.Relationships
@@ -35,6 +35,8 @@ defmodule ExVEx.Workbook do
             styles_path: nil,
             styles_dirty: false,
             calc_dirty: false,
+            sheet_trees: %{},
+            dirty_sheet_paths: MapSet.new(),
             source_path: nil
 
   @type t :: %__MODULE__{
@@ -51,8 +53,50 @@ defmodule ExVEx.Workbook do
           styles_path: String.t() | nil,
           styles_dirty: boolean(),
           calc_dirty: boolean(),
+          sheet_trees: %{String.t() => tuple()},
+          dirty_sheet_paths: MapSet.t(String.t()),
           source_path: Path.t() | nil
         }
+
+  @doc """
+  Returns the parsed worksheet tree for `path`, parsing and caching it on
+  first access. Subsequent calls reuse the cached tree so bulk reads and
+  writes don't pay the parse cost repeatedly.
+  """
+  @spec fetch_sheet_tree(t(), String.t()) :: {:ok, tuple(), t()} | {:error, term()}
+  def fetch_sheet_tree(%__MODULE__{sheet_trees: trees} = book, path) do
+    case Map.fetch(trees, path) do
+      {:ok, tree} ->
+        {:ok, tree, book}
+
+      :error ->
+        with {:ok, xml} <- fetch_part(book.parts, path),
+             {:ok, tree} <- Worksheet.parse_tree(xml) do
+          {:ok, tree, %{book | sheet_trees: Map.put(trees, path, tree)}}
+        end
+    end
+  end
+
+  @doc """
+  Updates the cached tree for `path` and marks the sheet dirty so
+  `flush/1` re-serializes it on save.
+  """
+  @spec put_sheet_tree(t(), String.t(), tuple()) :: t()
+  def put_sheet_tree(%__MODULE__{} = book, path, tree) do
+    %{
+      book
+      | sheet_trees: Map.put(book.sheet_trees, path, tree),
+        dirty_sheet_paths: MapSet.put(book.dirty_sheet_paths, path),
+        calc_dirty: true
+    }
+  end
+
+  defp fetch_part(parts, key) do
+    case Map.fetch(parts, key) do
+      {:ok, data} -> {:ok, data}
+      :error -> {:error, {:missing_part, key}}
+    end
+  end
 
   @doc """
   Produces a new workbook whose `parts` map has every in-memory parsed
@@ -62,9 +106,23 @@ defmodule ExVEx.Workbook do
   @spec flush(t()) :: t()
   def flush(%__MODULE__{} = book) do
     book
+    |> flush_sheet_trees()
     |> flush_shared_strings()
     |> flush_styles()
     |> flush_calc_invalidation()
+  end
+
+  defp flush_sheet_trees(%__MODULE__{dirty_sheet_paths: paths} = book) do
+    if MapSet.size(paths) == 0 do
+      book
+    else
+      Enum.reduce(paths, book, fn path, acc ->
+        tree = Map.fetch!(acc.sheet_trees, path)
+        xml = Worksheet.encode_tree(tree)
+        %{acc | parts: Map.put(acc.parts, path, xml)}
+      end)
+      |> Map.put(:dirty_sheet_paths, MapSet.new())
+    end
   end
 
   defp flush_calc_invalidation(%__MODULE__{calc_dirty: false} = book), do: book

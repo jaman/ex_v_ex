@@ -21,3 +21,6 @@ ex_v_ex-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+# Benchee binary snapshots (the .txt summaries are committed)
+/bench/results/*.benchee

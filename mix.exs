@@ -29,7 +29,8 @@ defmodule ExVEx.MixProject do
       {:saxy, "~> 1.5"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:benchee, "~> 1.3", only: :dev, runtime: false}
     ]
   end
 

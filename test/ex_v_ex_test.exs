@@ -621,7 +621,10 @@ defmodule ExVExTest do
     end
 
     test "unmerge_cells with on_missing: :ignore is a no-op", %{book: book} do
-      assert {:ok, ^book} = ExVEx.unmerge_cells(book, "Sheet1", "A1:B2", on_missing: :ignore)
+      assert {:ok, result} = ExVEx.unmerge_cells(book, "Sheet1", "A1:B2", on_missing: :ignore)
+      assert result.parts == book.parts
+      assert result.dirty_sheet_paths == MapSet.new()
+      refute result.calc_dirty
     end
 
     test "merged_ranges on a sheet with no merges returns []", %{book: book} do

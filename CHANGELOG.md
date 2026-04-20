@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (performance)
+
+Bulk writes are now ~20× faster with ~60× less memory churn.
+
+- **Sheet tree cache.** `%ExVEx.Workbook{}` now caches the parsed
+  `Saxy.SimpleForm` tree for every worksheet on first access. Subsequent
+  `get_cell`, `put_cell`, `merge_cells`, `unmerge_cells`, `merged_ranges`,
+  `get_formula`, `get_style`, `cells`, and `each_cell` calls reuse the
+  cached tree instead of re-parsing the XML. `save/2` re-serializes only
+  dirty sheet trees once at flush time.
+- **Shared-string interns are O(1).** `ExVEx.OOXML.SharedStrings` now
+  stores strings in two maps (`by_index`, `by_string`) instead of a
+  tuple. Interning a new string was O(N) per call (tuple copy); it is
+  now O(1).
+
+Benchmark: 500 `put_cell + save` dropped from 142 ms / 348 MB to 7 ms /
+6 MB. 1000 unique string interns + save dropped from 761 ms / 1.8 GB to
+36 ms / 16 MB. See `bench/results/README.md` for the full report and
+instructions on reproducing.
+
 ## [0.1.0] — 2026-04-17
 
 First release. Pre-alpha — API may evolve.

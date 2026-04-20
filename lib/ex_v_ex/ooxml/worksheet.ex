@@ -1,56 +1,74 @@
 defmodule ExVEx.OOXML.Worksheet do
   @moduledoc """
-  Parser for `xl/worksheets/sheet*.xml`.
+  Parser and surgical mutator for `xl/worksheets/sheet*.xml`.
 
-  Extracts the sparse cell grid from `<sheetData>` into a `%{coordinate =>
-  Cell}` map. Surrounding worksheet elements (`<sheetViews>`, `<cols>`,
-  `<mergeCells>`, `<pageMargins>`, etc.) are not yet modeled and are
-  preserved at the byte level by the higher-level workbook.
+  Two sets of operations are exposed:
+
+  - Binary-in / binary-out (`parse/1`, `put_cell/3`, `merge/3`, `unmerge/2`,
+    `merged_ranges/1`) — convenient for one-off use but each pays the cost
+    of a full `Saxy.SimpleForm` parse and re-emit.
+  - Tree-in / tree-out (`parse_tree/1`, `encode_tree/1`,
+    `put_cell_in_tree/3`, `merge_in_tree/3`, `unmerge_in_tree/2`,
+    `merged_ranges_from_tree/1`, `cells_from_tree/1`) — used by
+    `ExVEx.Workbook` to cache the parsed tree across many mutations and
+    serialize only once at `ExVEx.save/2` time. This is what keeps bulk
+    writes fast.
+
+  Surrounding worksheet elements (`<sheetViews>`, `<cols>`,
+  `<pageMargins>`, etc.) are not modeled; they pass through the
+  SimpleForm round-trip unchanged.
   """
 
   alias ExVEx.OOXML.Worksheet.Cell
   alias ExVEx.Utils.{Coordinate, Range}
 
   @type coordinate :: Coordinate.t()
+  @type tree :: {String.t(), list(), list()}
   @type t :: %__MODULE__{cells: %{coordinate() => Cell.t()}}
   defstruct cells: %{}
 
-  @spec parse(binary()) :: {:ok, t()} | {:error, term()}
-  def parse(xml) when is_binary(xml) do
+  @spec parse_tree(binary()) :: {:ok, tree()} | {:error, term()}
+  def parse_tree(xml) when is_binary(xml) do
     case Saxy.SimpleForm.parse_string(xml) do
-      {:ok, {"worksheet", _attrs, children}} ->
-        {:ok, %__MODULE__{cells: collect_cells(children)}}
-
-      {:ok, _other} ->
-        {:error, :not_a_worksheet}
-
-      {:error, reason} ->
-        {:error, reason}
+      {:ok, {"worksheet", _, _} = tree} -> {:ok, tree}
+      {:ok, _other} -> {:error, :not_a_worksheet}
+      {:error, reason} -> {:error, reason}
     end
   end
 
+  @spec encode_tree(tree()) :: binary()
+  def encode_tree({"worksheet", _, _} = tree) do
+    Saxy.encode!(tree, version: "1.0", encoding: "UTF-8", standalone: true)
+  end
+
+  @spec parse(binary()) :: {:ok, t()} | {:error, term()}
+  def parse(xml) when is_binary(xml) do
+    with {:ok, tree} <- parse_tree(xml), do: {:ok, cells_from_tree(tree)}
+  end
+
+  @spec cells_from_tree(tree()) :: t()
+  def cells_from_tree({"worksheet", _attrs, children}) do
+    %__MODULE__{cells: collect_cells(children)}
+  end
+
   @doc """
-  Surgically applies a cell mutation to a worksheet's raw XML and returns the
-  new XML. Unrelated cells, rows, and surrounding worksheet content are
-  preserved at the element level.
+  Surgically applies a cell mutation to a worksheet's raw XML and returns
+  the new XML. Unrelated cells, rows, and surrounding worksheet content
+  are preserved at the element level.
 
   Passing `nil` for value clears the cell.
   """
   @spec put_cell(binary(), coordinate(), ExVEx.cell_value()) ::
           {:ok, binary()} | {:error, term()}
   def put_cell(xml, coordinate, value) when is_binary(xml) do
-    case Saxy.SimpleForm.parse_string(xml) do
-      {:ok, {"worksheet", attrs, children}} ->
-        new_children = Enum.map(children, &mutate_sheet_data(&1, coordinate, value))
-        tree = {"worksheet", attrs, new_children}
-        {:ok, Saxy.encode!(tree, version: "1.0", encoding: "UTF-8", standalone: true)}
-
-      {:ok, _other} ->
-        {:error, :not_a_worksheet}
-
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, tree} <- parse_tree(xml) do
+      {:ok, encode_tree(put_cell_in_tree(tree, coordinate, value))}
     end
+  end
+
+  @spec put_cell_in_tree(tree(), coordinate(), ExVEx.cell_value()) :: tree()
+  def put_cell_in_tree({"worksheet", attrs, children}, coordinate, value) do
+    {"worksheet", attrs, Enum.map(children, &mutate_sheet_data(&1, coordinate, value))}
   end
 
   @doc """
@@ -58,17 +76,12 @@ defmodule ExVEx.OOXML.Worksheet do
   """
   @spec merged_ranges(binary()) :: {:ok, [Range.t()]} | {:error, term()}
   def merged_ranges(xml) when is_binary(xml) do
-    case Saxy.SimpleForm.parse_string(xml) do
-      {:ok, {"worksheet", _attrs, children}} ->
-        {:ok, collect_merged_ranges(children)}
-
-      {:ok, _other} ->
-        {:error, :not_a_worksheet}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    with {:ok, tree} <- parse_tree(xml), do: {:ok, merged_ranges_from_tree(tree)}
   end
+
+  @spec merged_ranges_from_tree(tree()) :: [Range.t()]
+  def merged_ranges_from_tree({"worksheet", _attrs, children}),
+    do: collect_merged_ranges(children)
 
   @doc """
   Adds a merged range to the worksheet. When `clear_non_anchor?` is true,
@@ -77,33 +90,32 @@ defmodule ExVEx.OOXML.Worksheet do
   """
   @spec merge(binary(), Range.t(), boolean()) :: {:ok, binary()} | {:error, term()}
   def merge(xml, %Range{} = range, clear_non_anchor?) when is_binary(xml) do
-    mutate_worksheet(xml, fn children ->
+    with {:ok, tree} <- parse_tree(xml) do
+      {:ok, encode_tree(merge_in_tree(tree, range, clear_non_anchor?))}
+    end
+  end
+
+  @spec merge_in_tree(tree(), Range.t(), boolean()) :: tree()
+  def merge_in_tree({"worksheet", attrs, children}, %Range{} = range, clear_non_anchor?) do
+    new_children =
       children
       |> maybe_clear_non_anchor(range, clear_non_anchor?)
       |> upsert_merge_cells_section(&add_merge_ref(&1, range))
-    end)
+
+    {"worksheet", attrs, new_children}
   end
 
   @doc "Removes a merged range from the worksheet."
   @spec unmerge(binary(), Range.t()) :: {:ok, binary()} | {:error, term()}
   def unmerge(xml, %Range{} = range) when is_binary(xml) do
-    mutate_worksheet(xml, fn children ->
-      upsert_merge_cells_section(children, &remove_merge_ref(&1, range))
-    end)
+    with {:ok, tree} <- parse_tree(xml),
+         do: {:ok, encode_tree(unmerge_in_tree(tree, range))}
   end
 
-  defp mutate_worksheet(xml, transformer) do
-    case Saxy.SimpleForm.parse_string(xml) do
-      {:ok, {"worksheet", attrs, children}} ->
-        tree = {"worksheet", attrs, transformer.(children)}
-        {:ok, Saxy.encode!(tree, version: "1.0", encoding: "UTF-8", standalone: true)}
-
-      {:ok, _other} ->
-        {:error, :not_a_worksheet}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+  @spec unmerge_in_tree(tree(), Range.t()) :: tree()
+  def unmerge_in_tree({"worksheet", attrs, children}, %Range{} = range) do
+    new_children = upsert_merge_cells_section(children, &remove_merge_ref(&1, range))
+    {"worksheet", attrs, new_children}
   end
 
   defp collect_merged_ranges(children) do

@@ -100,9 +100,9 @@ defmodule ExVEx do
           {:ok, cell_value() | Date.t() | NaiveDateTime.t()} | {:error, term()}
   def get_cell(%Workbook{} = book, sheet, ref) do
     with {:ok, coord} <- parse_coordinate(ref),
-         {:ok, sheet_xml} <- fetch_sheet_xml(book, sheet),
-         {:ok, worksheet} <- Worksheet.parse(sheet_xml) do
-      case Map.fetch(worksheet.cells, coord) do
+         {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
+      case find_cell(tree, coord) do
         {:ok, cell} -> resolve_cell_value(cell, book)
         :error -> {:ok, nil}
       end
@@ -114,17 +114,16 @@ defmodule ExVEx do
   def put_cell(%Workbook{} = book, sheet, ref, value) do
     with {:ok, coord} <- parse_coordinate(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, xml} <- fetch_part(book.parts, path) do
+         {:ok, tree, book} <- Workbook.fetch_sheet_tree(book, path) do
       {encoded, book} = prepare_cell_value(book, value)
-
-      with {:ok, new_xml} <- Worksheet.put_cell(xml, coord, encoded) do
-        {:ok, mark_mutated(book, path, new_xml)}
-      end
+      new_tree = Worksheet.put_cell_in_tree(tree, coord, encoded)
+      {:ok, Workbook.put_sheet_tree(book, path, new_tree)}
     end
   end
 
-  defp mark_mutated(book, path, new_xml) do
-    %{book | parts: Map.put(book.parts, path, new_xml), calc_dirty: true}
+  defp find_cell(tree, coord) do
+    %{cells: cells} = Worksheet.cells_from_tree(tree)
+    Map.fetch(cells, coord)
   end
 
   defp prepare_cell_value(%Workbook{shared_strings: %SharedStrings{}} = book, value)
@@ -164,10 +163,10 @@ defmodule ExVEx do
           {:ok, ExVEx.Style.t()} | {:error, term()}
   def get_style(%Workbook{} = book, sheet, ref) do
     with {:ok, coord} <- parse_coordinate(ref),
-         {:ok, sheet_xml} <- fetch_sheet_xml(book, sheet),
-         {:ok, worksheet} <- Worksheet.parse(sheet_xml) do
+         {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
       style_id =
-        case Map.fetch(worksheet.cells, coord) do
+        case find_cell(tree, coord) do
           {:ok, %{style_id: id}} -> id
           :error -> nil
         end
@@ -201,10 +200,10 @@ defmodule ExVEx do
 
     with {:ok, range} <- parse_range(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, xml} <- fetch_part(book.parts, path),
-         {:ok, xml} <- handle_overlap(xml, range, on_overlap),
-         {:ok, new_xml} <- Worksheet.merge(xml, range, not preserve) do
-      {:ok, mark_mutated(book, path, new_xml)}
+         {:ok, tree, book} <- Workbook.fetch_sheet_tree(book, path),
+         {:ok, tree} <- handle_overlap_on_tree(tree, range, on_overlap) do
+      new_tree = Worksheet.merge_in_tree(tree, range, not preserve)
+      {:ok, Workbook.put_sheet_tree(book, path, new_tree)}
     end
   end
 
@@ -224,16 +223,16 @@ defmodule ExVEx do
 
     with {:ok, range} <- parse_range(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, xml} <- fetch_part(book.parts, path),
-         {:ok, existing} <- Worksheet.merged_ranges(xml) do
-      apply_unmerge(book, path, xml, range, existing, on_missing)
+         {:ok, tree, book} <- Workbook.fetch_sheet_tree(book, path) do
+      existing = Worksheet.merged_ranges_from_tree(tree)
+      apply_unmerge(book, path, tree, range, existing, on_missing)
     end
   end
 
-  defp apply_unmerge(book, path, xml, range, existing, on_missing) do
+  defp apply_unmerge(book, path, tree, range, existing, on_missing) do
     if Enum.any?(existing, &exact_match?(&1, range)) do
-      with {:ok, new_xml} <- Worksheet.unmerge(xml, range),
-           do: {:ok, mark_mutated(book, path, new_xml)}
+      new_tree = Worksheet.unmerge_in_tree(tree, range)
+      {:ok, Workbook.put_sheet_tree(book, path, new_tree)}
     else
       handle_missing_unmerge(book, on_missing)
     end
@@ -245,9 +244,8 @@ defmodule ExVEx do
   @spec merged_ranges(Workbook.t(), sheet_name()) :: {:ok, [range_ref()]} | {:error, term()}
   def merged_ranges(%Workbook{} = book, sheet) do
     with {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, xml} <- fetch_part(book.parts, path),
-         {:ok, ranges} <- Worksheet.merged_ranges(xml) do
-      {:ok, Enum.map(ranges, &Range.to_string/1)}
+         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
+      {:ok, tree |> Worksheet.merged_ranges_from_tree() |> Enum.map(&Range.to_string/1)}
     end
   end
 
@@ -262,21 +260,16 @@ defmodule ExVEx do
     a.top_left == b.top_left and a.bottom_right == b.bottom_right
   end
 
-  defp handle_overlap(xml, _range, :allow), do: {:ok, xml}
+  defp handle_overlap_on_tree(tree, _range, :allow), do: {:ok, tree}
 
-  defp handle_overlap(xml, range, mode) when mode in [:error, :replace] do
-    {:ok, existing} = Worksheet.merged_ranges(xml)
+  defp handle_overlap_on_tree(tree, range, mode) when mode in [:error, :replace] do
+    existing = Worksheet.merged_ranges_from_tree(tree)
     overlap = Enum.find(existing, &(Range.overlaps?(&1, range) and not exact_match?(&1, range)))
 
     case {overlap, mode} do
-      {nil, _} ->
-        {:ok, xml}
-
-      {conflict, :error} ->
-        {:error, {:overlaps, Range.to_string(conflict)}}
-
-      {conflict, :replace} ->
-        Worksheet.unmerge(xml, conflict)
+      {nil, _} -> {:ok, tree}
+      {conflict, :error} -> {:error, {:overlaps, Range.to_string(conflict)}}
+      {conflict, :replace} -> {:ok, Worksheet.unmerge_in_tree(tree, conflict)}
     end
   end
 
@@ -287,9 +280,9 @@ defmodule ExVEx do
           {:ok, String.t() | nil} | {:error, term()}
   def get_formula(%Workbook{} = book, sheet, ref) do
     with {:ok, coord} <- parse_coordinate(ref),
-         {:ok, sheet_xml} <- fetch_sheet_xml(book, sheet),
-         {:ok, worksheet} <- Worksheet.parse(sheet_xml) do
-      case Map.fetch(worksheet.cells, coord) do
+         {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
+      case find_cell(tree, coord) do
         {:ok, %{formula: formula}} -> {:ok, formula}
         :error -> {:ok, nil}
       end
@@ -302,9 +295,10 @@ defmodule ExVEx do
   """
   @spec cells(Workbook.t(), sheet_name()) :: {:ok, %{cell_ref() => term()}} | {:error, term()}
   def cells(%Workbook{} = book, sheet) do
-    with {:ok, sheet_xml} <- fetch_sheet_xml(book, sheet),
-         {:ok, worksheet} <- Worksheet.parse(sheet_xml) do
-      {:ok, Enum.reduce(worksheet.cells, %{}, &put_resolved(&1, &2, book))}
+    with {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
+      %{cells: cells} = Worksheet.cells_from_tree(tree)
+      {:ok, Enum.reduce(cells, %{}, &put_resolved(&1, &2, book))}
     end
   end
 
@@ -323,10 +317,12 @@ defmodule ExVEx do
   @spec each_cell(Workbook.t(), sheet_name()) ::
           {:ok, Enumerable.t({cell_ref(), term()})} | {:error, term()}
   def each_cell(%Workbook{} = book, sheet) do
-    with {:ok, sheet_xml} <- fetch_sheet_xml(book, sheet),
-         {:ok, worksheet} <- Worksheet.parse(sheet_xml) do
+    with {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
+      %{cells: cells} = Worksheet.cells_from_tree(tree)
+
       stream =
-        worksheet.cells
+        cells
         |> Enum.sort_by(fn {coord, _} -> coord end)
         |> Stream.flat_map(&resolve_to_pair(&1, book))
 
@@ -361,12 +357,6 @@ defmodule ExVEx do
   end
 
   defp parse_coordinate(_), do: {:error, :invalid_coordinate}
-
-  defp fetch_sheet_xml(book, sheet) do
-    with {:ok, path} <- sheet_path_or_error(book, sheet) do
-      fetch_part(book.parts, path)
-    end
-  end
 
   defp resolve_cell_value(%{raw_type: :shared_string, raw_value: idx_str}, %Workbook{
          shared_strings: %SharedStrings{} = sst
