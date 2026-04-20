@@ -457,6 +457,53 @@ defmodule ExVExTest do
     end
   end
 
+  describe "ETS-backed cells: put_cell has shared-state semantics" do
+    test "sibling references sharing a cached editable see each other's mutations (numbers)" do
+      {:ok, base} = ExVEx.open(Fixtures.path("cells.xlsx"))
+
+      {:ok, once_written} = ExVEx.put_cell(base, "Sheet1", "Z1", 100)
+      {:ok, twice_written} = ExVEx.put_cell(once_written, "Sheet1", "Z1", 200)
+
+      assert ExVEx.get_cell(twice_written, "Sheet1", "Z1") == {:ok, 200}
+      assert ExVEx.get_cell(once_written, "Sheet1", "Z1") == {:ok, 200}
+    end
+
+    test "sibling references also see string mutations (SST is ETS-shared too)" do
+      {:ok, base} = ExVEx.open(Fixtures.path("cells.xlsx"))
+
+      {:ok, first} = ExVEx.put_cell(base, "Sheet1", "Z1", "alpha")
+      {:ok, second} = ExVEx.put_cell(first, "Sheet1", "Z1", "beta")
+
+      assert ExVEx.get_cell(second, "Sheet1", "Z1") == {:ok, "beta"}
+
+      assert ExVEx.get_cell(first, "Sheet1", "Z1") == {:ok, "beta"},
+             "string cells work across siblings because SST lives in ETS too"
+    end
+
+    test "pristine references are insulated (lazy parse creates a fresh table)" do
+      {:ok, pristine} = ExVEx.open(Fixtures.path("cells.xlsx"))
+
+      {:ok, _mutated} = ExVEx.put_cell(pristine, "Sheet1", "A1", "mutation")
+
+      assert ExVEx.get_cell(pristine, "Sheet1", "A1") == {:ok, "A1"},
+             "pristine never populated its sheet_trees; it parses a fresh editable on access"
+    end
+
+    test "close/1 releases the underlying ETS tables" do
+      {:ok, base} = ExVEx.open(Fixtures.path("cells.xlsx"))
+      {:ok, touched} = ExVEx.put_cell(base, "Sheet1", "A1", "wrote")
+
+      [%ExVEx.OOXML.Worksheet.Editable{cells_table: t} | _] =
+        touched.sheet_trees |> Map.values()
+
+      assert :ets.info(t) != :undefined
+
+      assert :ok = ExVEx.close(touched)
+
+      assert :ets.info(t) == :undefined
+    end
+  end
+
   describe "numeric coordinates: {row, col} tuples are interchangeable with A1" do
     setup do
       {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))

@@ -5,26 +5,31 @@ defmodule ExVEx.OOXML.SharedStrings do
   Most cell text in a real workbook is stored by index into this table — a
   cell with `t="s"` has a `<v>N</v>` that points at the Nth `<si>` entry.
 
-  Storage is two maps: `by_index` and `by_string`. Both lookups and interns
-  are O(1); interns are also allocation-cheap (map insertion, no copy of
-  an N-element array as a tuple-backed table would need).
+  Storage is ETS-backed: one `:set` table for index→string, another for
+  string→index. Lookups are O(1). Interns are O(1) and allocate nothing
+  beyond the single ETS row.
+
+  Because the tables are ETS, multiple `%ExVEx.Workbook{}` references
+  derived from the same `ExVEx.open/1` or `ExVEx.new/0` share the same
+  underlying SST state. This matches the sharing semantics of the
+  per-sheet cell tables so that string-valued cell mutations remain
+  internally consistent across workbook references.
 
   Rich-text formatting (`<r>` runs, `<rPr>` properties) is flattened into
-  plain text at parse time. Phonetic annotations (`<phoneticPr>`, `<rPh>`)
-  are stripped from the parsed view. The original XML bytes remain in the
-  workbook's `parts` map so untouched rich content round-trips even when
-  ExVEx doesn't model it.
+  plain text at parse time. Phonetic annotations (`<phoneticPr>`,
+  `<rPh>`) are stripped from the parsed view. The original XML bytes
+  remain in the workbook's `parts` map so untouched rich content
+  round-trips even when ExVEx doesn't model it.
   """
 
   @namespace "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
   @type t :: %__MODULE__{
-          count: non_neg_integer(),
-          by_index: %{non_neg_integer() => String.t()},
-          by_string: %{String.t() => non_neg_integer()}
+          by_index_table: :ets.tid() | nil,
+          by_string_table: :ets.tid() | nil
         }
 
-  defstruct count: 0, by_index: %{}, by_string: %{}
+  defstruct by_index_table: nil, by_string_table: nil
 
   @spec parse(binary()) :: {:ok, t()} | {:error, term()}
   def parse(xml) when is_binary(xml) do
@@ -41,48 +46,54 @@ defmodule ExVEx.OOXML.SharedStrings do
   end
 
   @spec get(t(), integer()) :: {:ok, String.t()} | :error
-  def get(%__MODULE__{by_index: by_index}, index)
-      when is_integer(index) and index >= 0 do
-    case Map.fetch(by_index, index) do
-      {:ok, text} -> {:ok, text}
-      :error -> :error
+  def get(%__MODULE__{by_index_table: table}, index)
+      when is_integer(index) and index >= 0 and not is_nil(table) do
+    case :ets.lookup(table, index) do
+      [{^index, text}] -> {:ok, text}
+      [] -> :error
     end
   end
 
   def get(%__MODULE__{}, _), do: :error
 
   @spec count(t()) :: non_neg_integer()
-  def count(%__MODULE__{count: n}), do: n
+  def count(%__MODULE__{by_index_table: nil}), do: 0
+  def count(%__MODULE__{by_index_table: table}), do: :ets.info(table, :size)
 
   @doc """
   Returns the index of a string in the table, adding it if it isn't there
-  yet. Returns `{index, updated_sst}`. O(1).
+  yet. Returns `{index, sst}` — `sst` is the same struct (ETS mutation is
+  in-place), included so callers can treat this identically to the
+  Map-backed version.
   """
   @spec intern(t(), String.t()) :: {non_neg_integer(), t()}
-  def intern(%__MODULE__{by_string: by_string} = sst, text) when is_binary(text) do
-    case Map.fetch(by_string, text) do
-      {:ok, existing} ->
+  def intern(%__MODULE__{by_string_table: str_table} = sst, text)
+      when is_binary(text) and not is_nil(str_table) do
+    case :ets.lookup(str_table, text) do
+      [{^text, existing}] ->
         {existing, sst}
 
-      :error ->
-        new_index = sst.count
-
-        {new_index,
-         %{
-           sst
-           | count: new_index + 1,
-             by_index: Map.put(sst.by_index, new_index, text),
-             by_string: Map.put(by_string, text, new_index)
-         }}
+      [] ->
+        new_index = :ets.info(sst.by_index_table, :size)
+        :ets.insert(sst.by_index_table, {new_index, text})
+        :ets.insert(str_table, {text, new_index})
+        {new_index, sst}
     end
   end
 
   @doc "Serialises the table back to an `xl/sharedStrings.xml` document."
   @spec serialize(t()) :: binary()
-  def serialize(%__MODULE__{count: count, by_index: by_index}) do
+  def serialize(%__MODULE__{by_index_table: nil}) do
+    empty_root = Saxy.XML.element("sst", empty_sst_attrs(), [])
+    Saxy.encode!(empty_root, version: "1.0", encoding: "UTF-8", standalone: true)
+  end
+
+  def serialize(%__MODULE__{by_index_table: table}) do
+    count = :ets.info(table, :size)
+
     items =
       for i <- 0..(count - 1)//1 do
-        text = Map.fetch!(by_index, i)
+        [{^i, text}] = :ets.lookup(table, i)
         Saxy.XML.element("si", [], [Saxy.XML.element("t", text_attrs(text), [text])])
       end
 
@@ -100,17 +111,36 @@ defmodule ExVEx.OOXML.SharedStrings do
     Saxy.encode!(root, version: "1.0", encoding: "UTF-8", standalone: true)
   end
 
+  @doc """
+  Releases the backing ETS tables. Call from `ExVEx.close/1` when done.
+  """
+  @spec close(t()) :: :ok
+  def close(%__MODULE__{by_index_table: idx, by_string_table: str}) do
+    if idx != nil, do: :ets.delete(idx)
+    if str != nil, do: :ets.delete(str)
+    :ok
+  end
+
+  defp empty_sst_attrs do
+    [{"xmlns", @namespace}, {"count", "0"}, {"uniqueCount", "0"}]
+  end
+
   defp text_attrs(text) do
     if String.match?(text, ~r/\A\s|\s\z|\n/), do: [{"xml:space", "preserve"}], else: []
   end
 
   defp build(strings) do
-    {count, by_index, by_string} =
-      Enum.reduce(strings, {0, %{}, %{}}, fn text, {i, idx_map, str_map} ->
-        {i + 1, Map.put(idx_map, i, text), Map.put_new(str_map, text, i)}
+    by_index = :ets.new(:exvex_sst_by_index, [:set, :public])
+    by_string = :ets.new(:exvex_sst_by_string, [:set, :public])
+
+    _final =
+      Enum.reduce(strings, 0, fn text, i ->
+        :ets.insert(by_index, {i, text})
+        :ets.insert_new(by_string, {text, i})
+        i + 1
       end)
 
-    %__MODULE__{count: count, by_index: by_index, by_string: by_string}
+    %__MODULE__{by_index_table: by_index, by_string_table: by_string}
   end
 
   defp string_item({"si", _attrs, children}) do

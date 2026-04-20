@@ -6,6 +6,42 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (performance — second round)
+
+Elixir bulk-write throughput now beats Python (openpyxl) on the
+comparative benchmark and runs in ~1/4 of the previous time.
+
+- **Map-backed editable sheet (`ExVEx.OOXML.Worksheet.Editable`).** The
+  SimpleForm tree's nested lists are replaced at edit time with a
+  `%{{row, col} => cell_tuple}` map. `put_cell` / `get_cell` /
+  `merge_cells` / `unmerge_cells` now work in O(log N) instead of
+  O(rows + cols) per call.
+- **ETS-backed cell grid and shared-string table.** Cells live in an
+  ETS `:set` table (O(1) ops). The shared-string table (`SharedStrings`)
+  has moved from a tuple to two ETS tables (`by_index`, `by_string`)
+  with O(1) intern. Read + write share state across workbook references
+  derived from the same `open` / `new`, which matches how cells are
+  shared — there is no "some-sharing-but-not-string-sharing" corner
+  case.
+- **`ExVEx.close/1`.** Releases the backing ETS tables. Optional in
+  short-lived processes (BEAM cleans up on exit), recommended in
+  long-running servers.
+
+Benchmark (Apple M3 Max, 12-sheet template, 24,800 cells per create,
+48,000 cells per edit):
+
+|                          | before (list) | after (ETS) | speedup |
+| ------------------------ | ------------: | ----------: | ------: |
+| Elixir create            | 481 ms        | 145 ms      | 3.3×    |
+| Elixir edit (rotations)  | 943 ms avg    | 245 ms avg  | 3.8×    |
+| Python edit              | ~300 ms       | ~300 ms     | (ref.)  |
+
+The API is unchanged. Shared-state is documented in the
+`ExVEx.OOXML.Worksheet.Editable` and `ExVEx.OOXML.SharedStrings`
+moduledocs — `{:ok, b2} = put_cell(b1, ...)` may leave `b1` observing
+`b2`'s mutation. In practice this doesn't affect the common flow
+(`open → mutate → save`); if you need a snapshot, save and re-open.
+
 ### Added (workbook creation)
 
 ExVEx is now a complete xlsx library — it can create workbooks from scratch,

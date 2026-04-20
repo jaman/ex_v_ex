@@ -17,8 +17,10 @@ defmodule ExVEx do
   without the caller needing to opt in.
   """
 
-  alias ExVEx.OOXML.{SharedStrings, Styles, Worksheet}
+  alias ExVEx.OOXML.SharedStrings
+  alias ExVEx.OOXML.Styles
   alias ExVEx.OOXML.Workbook, as: WorkbookXml
+  alias ExVEx.OOXML.Worksheet.Editable
   alias ExVEx.Packaging.{ContentTypes, Relationships, Zip}
   alias ExVEx.Utils.{Coordinate, Range}
   alias ExVEx.Workbook
@@ -138,6 +140,25 @@ defmodule ExVEx do
     |> Workbook.flush()
     |> Workbook.to_entries()
     |> then(&Zip.write(path, &1))
+  end
+
+  @doc """
+  Releases the ETS tables backing a workbook's cell grid. Calling this is
+  optional — tables are cleaned up when the owning process exits — but
+  recommended in long-running processes that open many workbooks.
+
+  After `close/1`, the workbook is no longer usable; calls to `get_cell`,
+  `put_cell`, etc. will fail.
+  """
+  @spec close(Workbook.t()) :: :ok
+  def close(%Workbook{} = book) do
+    Enum.each(book.sheet_trees, fn {_path, %Editable{cells_table: t}} ->
+      if t != nil, do: :ets.delete(t)
+    end)
+
+    if book.shared_strings, do: SharedStrings.close(book.shared_strings)
+
+    :ok
   end
 
   @spec sheet_names(Workbook.t()) :: [sheet_name()]
@@ -353,8 +374,8 @@ defmodule ExVEx do
   def get_cell(%Workbook{} = book, sheet, ref) do
     with {:ok, coord} <- parse_coordinate(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
-      case find_cell(tree, coord) do
+         {:ok, editable, _book} <- Workbook.fetch_sheet_tree(book, path) do
+      case Editable.cell_record_at(editable, coord) do
         {:ok, cell} -> resolve_cell_value(cell, book)
         :error -> {:ok, nil}
       end
@@ -366,16 +387,11 @@ defmodule ExVEx do
   def put_cell(%Workbook{} = book, sheet, ref, value) do
     with {:ok, coord} <- parse_coordinate(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, tree, book} <- Workbook.fetch_sheet_tree(book, path) do
+         {:ok, editable, book} <- Workbook.fetch_sheet_tree(book, path) do
       {encoded, book} = prepare_cell_value(book, value)
-      new_tree = Worksheet.put_cell_in_tree(tree, coord, encoded)
-      {:ok, Workbook.put_sheet_tree(book, path, new_tree)}
+      new_editable = Editable.put_cell(editable, coord, encoded)
+      {:ok, Workbook.put_sheet_tree(book, path, new_editable)}
     end
-  end
-
-  defp find_cell(tree, coord) do
-    %{cells: cells} = Worksheet.cells_from_tree(tree)
-    Map.fetch(cells, coord)
   end
 
   defp prepare_cell_value(%Workbook{shared_strings: %SharedStrings{}} = book, value)
@@ -416,9 +432,9 @@ defmodule ExVEx do
   def get_style(%Workbook{} = book, sheet, ref) do
     with {:ok, coord} <- parse_coordinate(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
+         {:ok, editable, _book} <- Workbook.fetch_sheet_tree(book, path) do
       style_id =
-        case find_cell(tree, coord) do
+        case Editable.cell_record_at(editable, coord) do
           {:ok, %{style_id: id}} -> id
           :error -> nil
         end
@@ -452,10 +468,10 @@ defmodule ExVEx do
 
     with {:ok, range} <- parse_range(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, tree, book} <- Workbook.fetch_sheet_tree(book, path),
-         {:ok, tree} <- handle_overlap_on_tree(tree, range, on_overlap) do
-      new_tree = Worksheet.merge_in_tree(tree, range, not preserve)
-      {:ok, Workbook.put_sheet_tree(book, path, new_tree)}
+         {:ok, editable, book} <- Workbook.fetch_sheet_tree(book, path),
+         {:ok, editable} <- handle_overlap_on_editable(editable, range, on_overlap) do
+      new_editable = Editable.merge(editable, range, not preserve)
+      {:ok, Workbook.put_sheet_tree(book, path, new_editable)}
     end
   end
 
@@ -475,16 +491,16 @@ defmodule ExVEx do
 
     with {:ok, range} <- parse_range(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, tree, book} <- Workbook.fetch_sheet_tree(book, path) do
-      existing = Worksheet.merged_ranges_from_tree(tree)
-      apply_unmerge(book, path, tree, range, existing, on_missing)
+         {:ok, editable, book} <- Workbook.fetch_sheet_tree(book, path) do
+      existing = Editable.merged_ranges(editable)
+      apply_unmerge(book, path, editable, range, existing, on_missing)
     end
   end
 
-  defp apply_unmerge(book, path, tree, range, existing, on_missing) do
+  defp apply_unmerge(book, path, editable, range, existing, on_missing) do
     if Enum.any?(existing, &exact_match?(&1, range)) do
-      new_tree = Worksheet.unmerge_in_tree(tree, range)
-      {:ok, Workbook.put_sheet_tree(book, path, new_tree)}
+      new_editable = Editable.unmerge(editable, range)
+      {:ok, Workbook.put_sheet_tree(book, path, new_editable)}
     else
       handle_missing_unmerge(book, on_missing)
     end
@@ -496,8 +512,8 @@ defmodule ExVEx do
   @spec merged_ranges(Workbook.t(), sheet_name()) :: {:ok, [range_ref()]} | {:error, term()}
   def merged_ranges(%Workbook{} = book, sheet) do
     with {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
-      {:ok, tree |> Worksheet.merged_ranges_from_tree() |> Enum.map(&Range.to_string/1)}
+         {:ok, editable, _book} <- Workbook.fetch_sheet_tree(book, path) do
+      {:ok, editable |> Editable.merged_ranges() |> Enum.map(&Range.to_string/1)}
     end
   end
 
@@ -512,16 +528,16 @@ defmodule ExVEx do
     a.top_left == b.top_left and a.bottom_right == b.bottom_right
   end
 
-  defp handle_overlap_on_tree(tree, _range, :allow), do: {:ok, tree}
+  defp handle_overlap_on_editable(editable, _range, :allow), do: {:ok, editable}
 
-  defp handle_overlap_on_tree(tree, range, mode) when mode in [:error, :replace] do
-    existing = Worksheet.merged_ranges_from_tree(tree)
+  defp handle_overlap_on_editable(editable, range, mode) when mode in [:error, :replace] do
+    existing = Editable.merged_ranges(editable)
     overlap = Enum.find(existing, &(Range.overlaps?(&1, range) and not exact_match?(&1, range)))
 
     case {overlap, mode} do
-      {nil, _} -> {:ok, tree}
+      {nil, _} -> {:ok, editable}
       {conflict, :error} -> {:error, {:overlaps, Range.to_string(conflict)}}
-      {conflict, :replace} -> {:ok, Worksheet.unmerge_in_tree(tree, conflict)}
+      {conflict, :replace} -> {:ok, Editable.unmerge(editable, conflict)}
     end
   end
 
@@ -533,8 +549,8 @@ defmodule ExVEx do
   def get_formula(%Workbook{} = book, sheet, ref) do
     with {:ok, coord} <- parse_coordinate(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
-      case find_cell(tree, coord) do
+         {:ok, editable, _book} <- Workbook.fetch_sheet_tree(book, path) do
+      case Editable.cell_record_at(editable, coord) do
         {:ok, %{formula: formula}} -> {:ok, formula}
         :error -> {:ok, nil}
       end
@@ -548,8 +564,8 @@ defmodule ExVEx do
   @spec cells(Workbook.t(), sheet_name()) :: {:ok, %{cell_ref() => term()}} | {:error, term()}
   def cells(%Workbook{} = book, sheet) do
     with {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
-      %{cells: cells} = Worksheet.cells_from_tree(tree)
+         {:ok, editable, _book} <- Workbook.fetch_sheet_tree(book, path) do
+      cells = Editable.cells_map(editable)
       {:ok, Enum.reduce(cells, %{}, &put_resolved(&1, &2, book))}
     end
   end
@@ -570,8 +586,8 @@ defmodule ExVEx do
           {:ok, Enumerable.t({cell_ref(), term()})} | {:error, term()}
   def each_cell(%Workbook{} = book, sheet) do
     with {:ok, path} <- sheet_path_or_error(book, sheet),
-         {:ok, tree, _book} <- Workbook.fetch_sheet_tree(book, path) do
-      %{cells: cells} = Worksheet.cells_from_tree(tree)
+         {:ok, editable, _book} <- Workbook.fetch_sheet_tree(book, path) do
+      cells = Editable.cells_map(editable)
 
       stream =
         cells

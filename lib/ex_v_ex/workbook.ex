@@ -13,8 +13,11 @@ defmodule ExVEx.Workbook do
   without exhaustively modelling every OOXML schema.
   """
 
-  alias ExVEx.OOXML.{SharedStrings, Styles, Worksheet}
+  alias ExVEx.OOXML.SharedStrings
+  alias ExVEx.OOXML.Styles
   alias ExVEx.OOXML.Workbook, as: WorkbookXml
+  alias ExVEx.OOXML.Worksheet
+  alias ExVEx.OOXML.Worksheet.Editable
   alias ExVEx.Packaging.ContentTypes
   alias ExVEx.Packaging.Relationships
   alias ExVEx.Packaging.Zip.Entry
@@ -63,29 +66,30 @@ defmodule ExVEx.Workbook do
   first access. Subsequent calls reuse the cached tree so bulk reads and
   writes don't pay the parse cost repeatedly.
   """
-  @spec fetch_sheet_tree(t(), String.t()) :: {:ok, tuple(), t()} | {:error, term()}
+  @spec fetch_sheet_tree(t(), String.t()) :: {:ok, Editable.t(), t()} | {:error, term()}
   def fetch_sheet_tree(%__MODULE__{sheet_trees: trees} = book, path) do
     case Map.fetch(trees, path) do
-      {:ok, tree} ->
-        {:ok, tree, book}
+      {:ok, editable} ->
+        {:ok, editable, book}
 
       :error ->
         with {:ok, xml} <- fetch_part(book.parts, path),
              {:ok, tree} <- Worksheet.parse_tree(xml) do
-          {:ok, tree, %{book | sheet_trees: Map.put(trees, path, tree)}}
+          editable = Editable.from_tree(tree)
+          {:ok, editable, %{book | sheet_trees: Map.put(trees, path, editable)}}
         end
     end
   end
 
   @doc """
-  Updates the cached tree for `path` and marks the sheet dirty so
+  Updates the cached sheet for `path` and marks the sheet dirty so
   `flush/1` re-serializes it on save.
   """
-  @spec put_sheet_tree(t(), String.t(), tuple()) :: t()
-  def put_sheet_tree(%__MODULE__{} = book, path, tree) do
+  @spec put_sheet_tree(t(), String.t(), Editable.t()) :: t()
+  def put_sheet_tree(%__MODULE__{} = book, path, %Editable{} = editable) do
     %{
       book
-      | sheet_trees: Map.put(book.sheet_trees, path, tree),
+      | sheet_trees: Map.put(book.sheet_trees, path, editable),
         dirty_sheet_paths: MapSet.put(book.dirty_sheet_paths, path),
         calc_dirty: true
     }
@@ -117,8 +121,8 @@ defmodule ExVEx.Workbook do
       book
     else
       Enum.reduce(paths, book, fn path, acc ->
-        tree = Map.fetch!(acc.sheet_trees, path)
-        xml = Worksheet.encode_tree(tree)
+        editable = Map.fetch!(acc.sheet_trees, path)
+        xml = editable |> Editable.to_tree() |> Worksheet.encode_tree()
         %{acc | parts: Map.put(acc.parts, path, xml)}
       end)
       |> Map.put(:dirty_sheet_paths, MapSet.new())

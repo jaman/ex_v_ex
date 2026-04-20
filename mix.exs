@@ -16,7 +16,8 @@ defmodule ExVEx.MixProject do
       docs: docs(),
       source_url: @source_url,
       name: "ExVEx",
-      elixirc_paths: elixirc_paths(Mix.env())
+      elixirc_paths: elixirc_paths(Mix.env()),
+      dialyzer: [plt_add_apps: [:mix]]
     ]
   end
 
