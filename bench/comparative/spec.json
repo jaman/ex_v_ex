@@ -1,0 +1,43 @@
+{
+  "description": "Shared xlsx workload spec. Every implementation (Elixir/Python/Rust) reads this file and performs identical operations in create and edit modes so results are directly comparable.",
+  "template": {
+    "summary_sheets": [
+      {"name": "Summary A", "merges": ["A1:E1", "A10:E10"], "formulas": [["B3", "=SUM('Data 1'!B:B)"], ["C3", "=SUM('Data 2'!B:B)"], ["D3", "=AVERAGE('Data 1'!C:C)"]]},
+      {"name": "Summary B", "merges": ["A1:D1"], "formulas": [["B2", "=COUNTA('Data 3'!A:A)"]]}
+    ],
+    "data_sheets": [
+      {"name": "Data 1", "rows": 500, "cols": 8},
+      {"name": "Data 2", "rows": 500, "cols": 8},
+      {"name": "Data 3", "rows": 500, "cols": 8},
+      {"name": "Data 4", "rows": 500, "cols": 8},
+      {"name": "Data 5", "rows": 500, "cols": 8},
+      {"name": "Data 6", "rows": 500, "cols": 8}
+    ],
+    "reference_sheets": [
+      {"name": "Ref USD", "rows": 50, "cols": 4},
+      {"name": "Ref EUR", "rows": 50, "cols": 4},
+      {"name": "Ref GBP", "rows": 50, "cols": 4},
+      {"name": "Ref JPY", "rows": 50, "cols": 4}
+    ]
+  },
+  "manipulation": {
+    "description": "For each data sheet: clear all existing rows, then write 500 fresh rows of 8 columns. Summary and reference sheets are not touched.",
+    "replace_data_sheets": true,
+    "rows_per_data_sheet": 500,
+    "cols_per_data_sheet": 8,
+    "seed": 42
+  },
+  "cell_generators": {
+    "description": "Deterministic value generators. Row index and column index are 1-based.",
+    "data_row_template": [
+      {"col": 1, "kind": "string", "pattern": "SYM%04d"},
+      {"col": 2, "kind": "float", "pattern": "row * 1.5 + col * 0.25"},
+      {"col": 3, "kind": "float", "pattern": "row * 0.1 + col * 0.01"},
+      {"col": 4, "kind": "int", "pattern": "row * col"},
+      {"col": 5, "kind": "string", "pattern": "LBL-%04d"},
+      {"col": 6, "kind": "bool", "pattern": "row % 2 == 0"},
+      {"col": 7, "kind": "string", "pattern": "B or S"},
+      {"col": 8, "kind": "int", "pattern": "row + col"}
+    ]
+  }
+}

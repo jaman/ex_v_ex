@@ -24,3 +24,8 @@ ex_v_ex-*.tar
 
 # Benchee binary snapshots (the .txt summaries are committed)
 /bench/results/*.benchee
+
+# Comparative benchmark run artifacts
+/bench/comparative/results/
+/bench/comparative/rust/target/
+/bench/comparative/rust/Cargo.lock
