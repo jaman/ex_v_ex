@@ -266,15 +266,16 @@ defmodule ExVEx.OOXML.Worksheet do
 
   defp mutate_rows(rows, {row_num, _col} = coord, value) do
     case find_row_index(rows, row_num) do
-      {:ok, idx} ->
-        List.update_at(rows, idx, fn row -> mutate_row(row, coord, value) end)
-        |> drop_empty_rows()
-
-      :error ->
+      nil ->
         case build_row(coord, value) do
           nil -> rows
           new_row -> insert_row(rows, new_row, row_num)
         end
+
+      idx ->
+        rows
+        |> List.update_at(idx, fn row -> mutate_row(row, coord, value) end)
+        |> drop_empty_rows()
     end
   end
 
@@ -283,10 +284,6 @@ defmodule ExVEx.OOXML.Worksheet do
       {"row", attrs, _} -> row_attr(attrs) == row_num
       _ -> false
     end)
-    |> case do
-      nil -> :error
-      idx -> {:ok, idx}
-    end
   end
 
   defp mutate_row({"row", attrs, cells}, coord, value) do

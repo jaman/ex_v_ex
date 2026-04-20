@@ -316,15 +316,16 @@ defmodule ExVEx.OOXML.Styles do
     end)
   end
 
+  @underline_values %{
+    "single" => :single,
+    "double" => :double,
+    "singleAccounting" => :single_accounting,
+    "doubleAccounting" => :double_accounting,
+    "none" => :none
+  }
+
   defp underline_value(attrs) do
-    case string_attr(attrs, "val", "single") do
-      "single" -> :single
-      "double" -> :double
-      "singleAccounting" -> :single_accounting
-      "doubleAccounting" -> :double_accounting
-      "none" -> :none
-      other -> String.to_atom(other)
-    end
+    Map.get(@underline_values, string_attr(attrs, "val", "single"), :unknown)
   end
 
   defp color_from_attrs(attrs) do
@@ -388,9 +389,31 @@ defmodule ExVEx.OOXML.Styles do
 
   defp fill_from_child(_), do: []
 
+  @pattern_types %{
+    "none" => :none,
+    "solid" => :solid,
+    "mediumGray" => :mediumGray,
+    "darkGray" => :darkGray,
+    "lightGray" => :lightGray,
+    "darkHorizontal" => :darkHorizontal,
+    "darkVertical" => :darkVertical,
+    "darkDown" => :darkDown,
+    "darkUp" => :darkUp,
+    "darkGrid" => :darkGrid,
+    "darkTrellis" => :darkTrellis,
+    "lightHorizontal" => :lightHorizontal,
+    "lightVertical" => :lightVertical,
+    "lightDown" => :lightDown,
+    "lightUp" => :lightUp,
+    "lightGrid" => :lightGrid,
+    "lightTrellis" => :lightTrellis,
+    "gray125" => :gray125,
+    "gray0625" => :gray0625
+  }
+
   defp pattern_type(attrs) do
     case List.keyfind(attrs, "patternType", 0) do
-      {_, value} -> String.to_atom(value)
+      {_, value} -> Map.get(@pattern_types, value, :unknown)
       nil -> :none
     end
   end
@@ -429,9 +452,26 @@ defmodule ExVEx.OOXML.Styles do
     }
   end
 
+  @side_styles %{
+    "none" => :none,
+    "thin" => :thin,
+    "medium" => :medium,
+    "dashed" => :dashed,
+    "dotted" => :dotted,
+    "thick" => :thick,
+    "double" => :double,
+    "hair" => :hair,
+    "mediumDashed" => :mediumDashed,
+    "dashDot" => :dashDot,
+    "mediumDashDot" => :mediumDashDot,
+    "dashDotDot" => :dashDotDot,
+    "mediumDashDotDot" => :mediumDashDotDot,
+    "slantDashDot" => :slantDashDot
+  }
+
   defp side_style(attrs) do
     case List.keyfind(attrs, "style", 0) do
-      {_, value} -> String.to_atom(value)
+      {_, value} -> Map.get(@side_styles, value, :unknown)
       nil -> :none
     end
   end
@@ -458,15 +498,41 @@ defmodule ExVEx.OOXML.Styles do
     end
   end
 
+  @horizontal_aligns %{
+    "general" => :general,
+    "left" => :left,
+    "center" => :center,
+    "right" => :right,
+    "fill" => :fill,
+    "justify" => :justify,
+    "centerContinuous" => :center_continuous,
+    "distributed" => :distributed
+  }
+
+  @vertical_aligns %{
+    "top" => :top,
+    "center" => :center,
+    "bottom" => :bottom,
+    "justify" => :justify,
+    "distributed" => :distributed
+  }
+
   defp alignment_from_attrs(attrs) do
     %AlignmentRecord{
-      horizontal: atom_attr(attrs, "horizontal", :general),
-      vertical: atom_attr(attrs, "vertical", :bottom),
+      horizontal: enum_attr(attrs, "horizontal", @horizontal_aligns, :general),
+      vertical: enum_attr(attrs, "vertical", @vertical_aligns, :bottom),
       wrap_text: bool_attr(attrs, "wrapText"),
       text_rotation: integer_attr(attrs, "textRotation", 0),
       indent: integer_attr(attrs, "indent", 0),
       shrink_to_fit: bool_attr(attrs, "shrinkToFit")
     }
+  end
+
+  defp enum_attr(attrs, name, mapping, default) do
+    case List.keyfind(attrs, name, 0) do
+      {_, value} -> Map.get(mapping, value, :unknown)
+      nil -> default
+    end
   end
 
   defp integer_attr(attrs, name, default) do
@@ -502,13 +568,6 @@ defmodule ExVEx.OOXML.Styles do
   defp string_attr(attrs, name, default) do
     case List.keyfind(attrs, name, 0) do
       {_, value} -> value
-      nil -> default
-    end
-  end
-
-  defp atom_attr(attrs, name, default) do
-    case List.keyfind(attrs, name, 0) do
-      {_, value} -> String.to_atom(value)
       nil -> default
     end
   end

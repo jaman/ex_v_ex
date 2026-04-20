@@ -63,6 +63,60 @@ defmodule ExVEx.OOXML.StylesTest do
     end
   end
 
+  describe "unknown OOXML enum values are safely mapped (no atom leak)" do
+    test "unknown patternType becomes :unknown, not a fresh atom" do
+      malformed = """
+      <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <fonts count="1"><font><sz val="11"/></font></fonts>
+        <fills count="1"><fill><patternFill patternType="evilUnknownValue"/></fill></fills>
+        <borders count="1"><border><left/><right/><top/><bottom/></border></borders>
+        <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs>
+      </styleSheet>
+      """
+
+      assert {:ok, styles} = Styles.parse(malformed)
+      assert [fill | _] = styles.fills
+      assert fill.pattern == :unknown
+    end
+
+    test "unknown border style becomes :unknown" do
+      malformed = """
+      <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <borders count="1">
+          <border>
+            <left style="superThick"/>
+            <right/><top/><bottom/>
+          </border>
+        </borders>
+        <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs>
+      </styleSheet>
+      """
+
+      assert {:ok, styles} = Styles.parse(malformed)
+      assert [border | _] = styles.borders
+      assert border.left.style == :unknown
+    end
+
+    test "unknown horizontal alignment becomes :unknown" do
+      malformed = """
+      <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <cellXfs count="1">
+          <xf numFmtId="0" fontId="0" fillId="0" borderId="0">
+            <alignment horizontal="somethingWeird"/>
+          </xf>
+        </cellXfs>
+      </styleSheet>
+      """
+
+      assert {:ok, styles} = Styles.parse(malformed)
+      xf = Enum.at(styles.cell_formats, 0)
+      assert xf.alignment.horizontal == :unknown
+    end
+  end
+
   describe "cell_format/2" do
     test "returns the xf at the given index" do
       {:ok, styles} = Styles.parse(@stylesheet)

@@ -53,9 +53,10 @@ defmodule ExVEx do
          workbook_rels_path = rels_path_for(workbook_path),
          {:ok, workbook_rels_xml} <- fetch_part(parts, workbook_rels_path),
          {:ok, workbook_rels} <- Relationships.parse(workbook_rels_xml),
-         {:ok, shared_strings, sst_path} <-
-           maybe_load_shared_strings(parts, workbook_rels, workbook_path),
-         {:ok, styles, styles_path} <- maybe_load_styles(parts, workbook_rels, workbook_path) do
+         sst_path = resolve_rel_target(workbook_rels, @shared_strings_type, workbook_path),
+         styles_path = resolve_rel_target(workbook_rels, @styles_type, workbook_path),
+         {:ok, shared_strings} <- maybe_load_part(parts, sst_path, &SharedStrings.parse/1),
+         {:ok, styles} <- maybe_load_part(parts, styles_path, &Styles.parse/1) do
       {:ok,
        %Workbook{
          parts: parts,
@@ -473,39 +474,19 @@ defmodule ExVEx do
     end
   end
 
-  defp maybe_load_shared_strings(parts, rels, workbook_path) do
-    load_relationship_part(
-      parts,
-      rels,
-      workbook_path,
-      @shared_strings_type,
-      &SharedStrings.parse/1
-    )
-  end
-
-  defp maybe_load_styles(parts, rels, workbook_path) do
-    load_relationship_part(parts, rels, workbook_path, @styles_type, &Styles.parse/1)
-  end
-
-  defp load_relationship_part(
-         parts,
-         %Relationships{entries: entries},
-         workbook_path,
-         type,
-         parser
-       ) do
+  defp resolve_rel_target(%Relationships{entries: entries}, type, workbook_path) do
     case Enum.find(entries, &(&1.type == type)) do
-      nil -> {:ok, nil, nil}
-      rel -> load_found_part(parts, rel, workbook_path, parser)
+      nil -> nil
+      rel -> Relationships.resolve(rel, rels_path_for(workbook_path))
     end
   end
 
-  defp load_found_part(parts, rel, workbook_path, parser) do
-    path = Relationships.resolve(rel, rels_path_for(workbook_path))
+  defp maybe_load_part(_parts, nil, _parser), do: {:ok, nil}
 
+  defp maybe_load_part(parts, path, parser) do
     case Map.fetch(parts, path) do
-      {:ok, xml} -> with {:ok, parsed} <- parser.(xml), do: {:ok, parsed, path}
-      :error -> {:ok, nil, nil}
+      {:ok, xml} -> parser.(xml)
+      :error -> {:ok, nil}
     end
   end
 
