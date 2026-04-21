@@ -83,16 +83,24 @@ defmodule ExVEx.OOXML.Styles do
   end
 
   @doc """
-  Re-serialises the stylesheet into its original XML container, rewriting
-  only the `<cellXfs>` section. All other elements (fonts, fills, borders,
-  cellStyles, dxfs, tableStyles, etc.) are preserved at the element level
-  from `original_xml`.
+  Re-serialises the stylesheet into its original XML container,
+  rewriting the `<numFmts>`, `<fonts>`, `<fills>`, `<borders>`, and
+  `<cellXfs>` sections from the in-memory struct. Elements we don't
+  model (`<cellStyles>`, `<dxfs>`, `<tableStyles>`, extension lists,
+  etc.) are preserved verbatim.
   """
   @spec serialize_into(t(), binary()) :: binary()
-  def serialize_into(%__MODULE__{cell_formats: xfs}, original_xml) when is_binary(original_xml) do
+  def serialize_into(%__MODULE__{} = styles, original_xml) when is_binary(original_xml) do
     case Saxy.SimpleForm.parse_string(original_xml) do
       {:ok, {"styleSheet", attrs, children}} ->
-        new_children = replace_cell_xfs(children, xfs)
+        new_children =
+          children
+          |> replace_section("numFmts", num_fmts_element(styles.num_fmts))
+          |> replace_section("fonts", fonts_element(styles.fonts))
+          |> replace_section("fills", fills_element(styles.fills))
+          |> replace_section("borders", borders_element(styles.borders))
+          |> replace_section("cellXfs", cell_xfs_element(styles.cell_formats))
+
         tree = {"styleSheet", attrs, new_children}
         Saxy.encode!(tree, version: "1.0", encoding: "UTF-8", standalone: true)
 
@@ -101,29 +109,185 @@ defmodule ExVEx.OOXML.Styles do
     end
   end
 
-  defp replace_cell_xfs(children, xfs) do
-    new_section = cell_xfs_element(xfs)
+  @section_predecessors %{
+    "numFmts" => ["fonts", "fills", "borders", "cellStyleXfs", "cellXfs"],
+    "fonts" => ["fills", "borders", "cellStyleXfs", "cellXfs"],
+    "fills" => ["borders", "cellStyleXfs", "cellXfs"],
+    "borders" => ["cellStyleXfs", "cellXfs"],
+    "cellXfs" => ["cellStyles", "dxfs", "tableStyles", "colors", "extLst"]
+  }
 
-    {updated, found?} =
-      Enum.map_reduce(children, false, fn
-        {"cellXfs", _, _}, _ -> {new_section, true}
-        other, seen -> {other, seen}
-      end)
+  defp replace_section(children, name, new_section) do
+    if empty_section?(new_section) do
+      drop_section(children, name)
+    else
+      {updated, found?} =
+        Enum.map_reduce(children, false, fn
+          {^name, _, _}, _ -> {new_section, true}
+          other, seen -> {other, seen}
+        end)
 
-    if found?, do: updated, else: insert_cell_xfs(updated, new_section)
+      if found? do
+        updated
+      else
+        insert_section(updated, new_section, Map.fetch!(@section_predecessors, name))
+      end
+    end
   end
 
-  defp insert_cell_xfs(children, new_section) do
+  defp empty_section?({_, _, []}), do: true
+  defp empty_section?(_), do: false
+
+  defp drop_section(children, name) do
+    Enum.reject(children, &match?({^name, _, _}, &1))
+  end
+
+  defp insert_section(children, section, successor_names) do
+    successor_set = MapSet.new(successor_names)
+
     idx =
       Enum.find_index(children, fn
-        {"cellStyles", _, _} -> true
-        {"dxfs", _, _} -> true
-        {"tableStyles", _, _} -> true
+        {name, _, _} -> MapSet.member?(successor_set, name)
         _ -> false
       end) || length(children)
 
-    List.insert_at(children, idx, new_section)
+    List.insert_at(children, idx, section)
   end
+
+  defp num_fmts_element(num_fmts)
+
+  defp num_fmts_element([]), do: {"numFmts", [], []}
+
+  defp num_fmts_element(num_fmts) do
+    children =
+      num_fmts
+      |> Enum.sort_by(& &1.id)
+      |> Enum.map(fn %NumFmt{id: id, format_code: code} ->
+        {"numFmt", [{"numFmtId", Integer.to_string(id)}, {"formatCode", code}], []}
+      end)
+
+    {"numFmts", [{"count", Integer.to_string(length(children))}], children}
+  end
+
+  defp fonts_element([]), do: {"fonts", [], []}
+
+  defp fonts_element(fonts) do
+    {"fonts", [{"count", Integer.to_string(length(fonts))}], Enum.map(fonts, &font_element/1)}
+  end
+
+  defp font_element(%Font{} = font) do
+    children =
+      []
+      |> append_if(font.bold, {"b", [], []})
+      |> append_if(font.italic, {"i", [], []})
+      |> append_if(font.strike, {"strike", [], []})
+      |> append_if(font.underline != :none, underline_element(font.underline))
+      |> maybe_append(font.size && size_element(font.size))
+      |> maybe_append(font.color && color_element("color", font.color))
+      |> maybe_append(font.name && name_element(font.name))
+
+    {"font", [], children}
+  end
+
+  defp maybe_append(list, nil), do: list
+  defp maybe_append(list, false), do: list
+  defp maybe_append(list, item), do: list ++ [item]
+
+  defp size_element(n) when is_number(n), do: {"sz", [{"val", number_to_binary(n)}], []}
+
+  defp name_element(name), do: {"name", [{"val", name}], []}
+
+  defp underline_element(:single), do: {"u", [], []}
+  defp underline_element(:double), do: {"u", [{"val", "double"}], []}
+
+  defp underline_element(:single_accounting),
+    do: {"u", [{"val", "singleAccounting"}], []}
+
+  defp underline_element(:double_accounting),
+    do: {"u", [{"val", "doubleAccounting"}], []}
+
+  defp underline_element(_), do: {"u", [], []}
+
+  defp color_element(_tag, nil), do: nil
+
+  defp color_element(tag, %Color{kind: :rgb, value: value}),
+    do: {tag, [{"rgb", value}], []}
+
+  defp color_element(tag, %Color{kind: :theme, value: value, tint: nil}),
+    do: {tag, [{"theme", Integer.to_string(value)}], []}
+
+  defp color_element(tag, %Color{kind: :theme, value: value, tint: tint}),
+    do: {tag, [{"theme", Integer.to_string(value)}, {"tint", number_to_binary(tint)}], []}
+
+  defp color_element(tag, %Color{kind: :indexed, value: value}),
+    do: {tag, [{"indexed", Integer.to_string(value)}], []}
+
+  defp color_element(tag, %Color{kind: :auto}), do: {tag, [{"auto", "1"}], []}
+
+  defp fills_element([]), do: {"fills", [], []}
+
+  defp fills_element(fills) do
+    {"fills", [{"count", Integer.to_string(length(fills))}], Enum.map(fills, &fill_element/1)}
+  end
+
+  defp fill_element(%Fill{} = fill) do
+    pattern_attrs =
+      if fill.pattern == :none do
+        [{"patternType", "none"}]
+      else
+        [{"patternType", Atom.to_string(fill.pattern)}]
+      end
+
+    pattern_children =
+      []
+      |> maybe_append(fill.foreground_color && color_element("fgColor", fill.foreground_color))
+      |> maybe_append(fill.background_color && color_element("bgColor", fill.background_color))
+
+    {"fill", [], [{"patternFill", pattern_attrs, pattern_children}]}
+  end
+
+  defp borders_element([]), do: {"borders", [], []}
+
+  defp borders_element(borders) do
+    {"borders", [{"count", Integer.to_string(length(borders))}],
+     Enum.map(borders, &border_element/1)}
+  end
+
+  defp border_element(%Border{} = border) do
+    {"border", [],
+     [
+       side_element("left", border.left),
+       side_element("right", border.right),
+       side_element("top", border.top),
+       side_element("bottom", border.bottom),
+       {"diagonal", [], []}
+     ]}
+  end
+
+  defp side_element(tag, %Side{style: :none}), do: {tag, [], []}
+
+  defp side_element(tag, %Side{style: style, color: nil}),
+    do: {tag, [{"style", Atom.to_string(style)}], []}
+
+  defp side_element(tag, %Side{style: style, color: color}) do
+    children =
+      case color_element("color", color) do
+        nil -> []
+        elem -> [elem]
+      end
+
+    {tag, [{"style", Atom.to_string(style)}], children}
+  end
+
+  defp append_if(list, false, _), do: list
+  defp append_if(list, true, item), do: list ++ [item]
+  defp append_if(list, nil, _), do: list
+  defp append_if(list, _truthy, item), do: list ++ [item]
+
+  defp number_to_binary(n) when is_integer(n), do: Integer.to_string(n)
+
+  defp number_to_binary(n) when is_float(n),
+    do: :erlang.float_to_binary(n, [:compact, {:decimals, 10}])
 
   defp cell_xfs_element(xfs) do
     children = Enum.map(xfs, &cell_format_element/1)
@@ -177,17 +341,89 @@ defmodule ExVEx.OOXML.Styles do
   index is the value that goes into a cell's `s` attribute.
   """
   @spec upsert_date_format(t(), non_neg_integer()) :: {non_neg_integer(), t()}
-  def upsert_date_format(%__MODULE__{cell_formats: xfs} = styles, num_fmt_id) do
-    case Enum.find_index(xfs, fn xf ->
-           xf.num_fmt_id == num_fmt_id and xf.font_id == 0 and xf.fill_id == 0 and
-             xf.border_id == 0 and xf.alignment == nil
-         end) do
-      nil ->
-        new_xf = %CellFormat{num_fmt_id: num_fmt_id}
-        {length(xfs), %{styles | cell_formats: xfs ++ [new_xf]}}
+  def upsert_date_format(%__MODULE__{} = styles, num_fmt_id) do
+    upsert_cell_format(styles, %CellFormat{num_fmt_id: num_fmt_id})
+  end
 
-      idx ->
-        {idx, styles}
+  @doc "Finds-or-adds a font. Returns `{index, updated_styles}`."
+  @spec upsert_font(t(), Font.t()) :: {non_neg_integer(), t()}
+  def upsert_font(%__MODULE__{fonts: fonts} = styles, %Font{} = font) do
+    case Enum.find_index(fonts, &(&1 == font)) do
+      nil -> {length(fonts), %{styles | fonts: fonts ++ [font]}}
+      idx -> {idx, styles}
+    end
+  end
+
+  @doc "Finds-or-adds a fill. Returns `{index, updated_styles}`."
+  @spec upsert_fill(t(), Fill.t()) :: {non_neg_integer(), t()}
+  def upsert_fill(%__MODULE__{fills: fills} = styles, %Fill{} = fill) do
+    case Enum.find_index(fills, &(&1 == fill)) do
+      nil -> {length(fills), %{styles | fills: fills ++ [fill]}}
+      idx -> {idx, styles}
+    end
+  end
+
+  @doc "Finds-or-adds a border. Returns `{index, updated_styles}`."
+  @spec upsert_border(t(), Border.t()) :: {non_neg_integer(), t()}
+  def upsert_border(%__MODULE__{borders: borders} = styles, %Border{} = border) do
+    case Enum.find_index(borders, &(&1 == border)) do
+      nil -> {length(borders), %{styles | borders: borders ++ [border]}}
+      idx -> {idx, styles}
+    end
+  end
+
+  @doc """
+  Finds-or-adds a number format code and returns `{numFmtId, styles}`.
+  Recognises built-in codes and returns the built-in id without adding
+  anything to the custom list.
+  """
+  @spec upsert_num_fmt(t(), String.t()) :: {non_neg_integer(), t()}
+  def upsert_num_fmt(%__MODULE__{} = styles, "General"), do: {0, styles}
+
+  def upsert_num_fmt(%__MODULE__{num_fmts: num_fmts} = styles, format_code)
+      when is_binary(format_code) do
+    case builtin_for_format_code(format_code) do
+      {:ok, id} ->
+        {id, styles}
+
+      :error ->
+        case Enum.find(num_fmts, &(&1.format_code == format_code)) do
+          %NumFmt{id: id} ->
+            {id, styles}
+
+          nil ->
+            next_id = next_custom_num_fmt_id(num_fmts)
+            new_num_fmt = %NumFmt{id: next_id, format_code: format_code}
+            {next_id, %{styles | num_fmts: num_fmts ++ [new_num_fmt]}}
+        end
+    end
+  end
+
+  defp builtin_for_format_code(code) do
+    case Enum.find(@builtin_format_codes, fn {_id, builtin_code} -> builtin_code == code end) do
+      {id, _} -> {:ok, id}
+      nil -> :error
+    end
+  end
+
+  defp next_custom_num_fmt_id([]), do: 164
+
+  defp next_custom_num_fmt_id(num_fmts) do
+    max_custom =
+      num_fmts
+      |> Enum.map(& &1.id)
+      |> Enum.filter(&(&1 >= 164))
+      |> Enum.max(fn -> 163 end)
+
+    max_custom + 1
+  end
+
+  @doc "Finds-or-adds a full `<xf>` record. Returns `{index, styles}`."
+  @spec upsert_cell_format(t(), CellFormat.t()) :: {non_neg_integer(), t()}
+  def upsert_cell_format(%__MODULE__{cell_formats: xfs} = styles, %CellFormat{} = xf) do
+    case Enum.find_index(xfs, &(&1 == xf)) do
+      nil -> {length(xfs), %{styles | cell_formats: xfs ++ [xf]}}
+      idx -> {idx, styles}
     end
   end
 

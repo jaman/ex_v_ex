@@ -96,6 +96,36 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
     end
   end
 
+  @spec set_cell_style(t(), ExVEx.Utils.Coordinate.t(), non_neg_integer()) :: t()
+  def set_cell_style(%__MODULE__{cells_table: table, row_attrs: row_attrs} = e, coord, style_id)
+      when is_integer(style_id) and style_id >= 0 do
+    new_cell =
+      case :ets.lookup(table, coord) do
+        [{^coord, {"c", attrs, children}}] ->
+          new_attrs =
+            attrs
+            |> Enum.reject(fn {name, _} -> name == "s" end)
+            |> then(fn attrs -> [{"s", Integer.to_string(style_id)} | attrs] end)
+            |> move_r_first()
+
+          {"c", new_attrs, children}
+
+        [] ->
+          {"c", [{"r", Coordinate.to_string(coord)}, {"s", Integer.to_string(style_id)}], []}
+      end
+
+    :ets.insert(table, {coord, new_cell})
+    new_row_attrs = ensure_row_attrs(row_attrs, coord)
+    if new_row_attrs === row_attrs, do: e, else: %{e | row_attrs: new_row_attrs}
+  end
+
+  defp move_r_first(attrs) do
+    case List.keyfind(attrs, "r", 0) do
+      nil -> attrs
+      r_tuple -> [r_tuple | Enum.reject(attrs, fn {name, _} -> name == "r" end)]
+    end
+  end
+
   @spec get_cell(t(), ExVEx.Utils.Coordinate.t()) :: {:ok, cell_element()} | :error
   def get_cell(%__MODULE__{cells_table: table}, coord) do
     case :ets.lookup(table, coord) do

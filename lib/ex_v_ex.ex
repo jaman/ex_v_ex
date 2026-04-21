@@ -19,9 +19,11 @@ defmodule ExVEx do
 
   alias ExVEx.OOXML.SharedStrings
   alias ExVEx.OOXML.Styles
+  alias ExVEx.OOXML.Styles.CellFormat
   alias ExVEx.OOXML.Workbook, as: WorkbookXml
   alias ExVEx.OOXML.Worksheet.Editable
   alias ExVEx.Packaging.{ContentTypes, Relationships, Zip}
+  alias ExVEx.Style.{Border, Builder, Fill, Font}
   alias ExVEx.Utils.{Coordinate, Range}
   alias ExVEx.Workbook
 
@@ -566,6 +568,111 @@ defmodule ExVEx do
       {:ok, Styles.resolve(book.styles || %Styles{}, style_id)}
     end
   end
+
+  @doc """
+  Merges the given style options into the cell's existing style.
+
+  Options include font (`:bold`, `:italic`, `:strike`, `:underline`,
+  `:font_size`, `:font_name`, `:color`), fill (`:background`,
+  `:fill_pattern`, `:fill_fg`, `:fill_bg`), border (`:border`,
+  `:border_color`, `:border_top`, `:border_bottom`, `:border_left`,
+  `:border_right`), alignment (`:align`, `:valign`, `:wrap_text`,
+  `:indent`, `:text_rotation`, `:shrink_to_fit`), and `:number_format`
+  (`"#,##0.00"`, `"yyyy-mm-dd"`, etc.).
+
+  Colours accept `"RRGGBB"` (auto-prefixed to ARGB), `"AARRGGBB"`,
+  `{:theme, n}`, `{:indexed, n}`, or `:auto`.
+
+  See `ExVEx.Style.Builder` for the full list.
+  """
+  @spec put_style(Workbook.t(), sheet_name(), cell_ref(), keyword()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def put_style(%Workbook{} = book, sheet, ref, opts) when is_list(opts) do
+    with {:ok, coord} <- parse_coordinate(ref),
+         {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, editable, book} <- Workbook.fetch_sheet_tree(book, path) do
+      current_style_id =
+        case Editable.cell_record_at(editable, coord) do
+          {:ok, %{style_id: id}} -> id
+          :error -> nil
+        end
+
+      styles = book.styles || %Styles{}
+      current_xf = load_xf(styles, current_style_id)
+      {new_style_id, new_styles} = compute_new_style_id(styles, current_xf, opts)
+
+      new_editable = Editable.set_cell_style(editable, coord, new_style_id)
+
+      book =
+        book
+        |> Map.put(:styles, new_styles)
+        |> Map.put(:styles_dirty, true)
+        |> Map.put(:styles_path, styles_path_for(book))
+        |> Workbook.put_sheet_tree(path, new_editable)
+
+      {:ok, book}
+    end
+  end
+
+  defp load_xf(_styles, nil), do: %CellFormat{}
+
+  defp load_xf(styles, id) do
+    case Styles.cell_format(styles, id) do
+      {:ok, xf} -> xf
+      :error -> %CellFormat{}
+    end
+  end
+
+  defp compute_new_style_id(styles, current_xf, opts) do
+    current_font = fetch_or_default(styles.fonts, current_xf.font_id, %Font{})
+    current_fill = fetch_or_default(styles.fills, current_xf.fill_id, %Fill{})
+    current_border = fetch_or_default(styles.borders, current_xf.border_id, %Border{})
+    current_alignment = current_xf.alignment
+
+    new_font = Builder.apply_to_font(current_font, opts)
+    new_fill = Builder.apply_to_fill(current_fill, opts)
+    new_border = Builder.apply_to_border(current_border, opts)
+    new_alignment = Builder.apply_to_alignment(current_alignment, opts)
+
+    {font_id, styles} =
+      if new_font == current_font,
+        do: {current_xf.font_id, styles},
+        else: Styles.upsert_font(styles, new_font)
+
+    {fill_id, styles} =
+      if new_fill == current_fill,
+        do: {current_xf.fill_id, styles},
+        else: Styles.upsert_fill(styles, new_fill)
+
+    {border_id, styles} =
+      if new_border == current_border,
+        do: {current_xf.border_id, styles},
+        else: Styles.upsert_border(styles, new_border)
+
+    {num_fmt_id, styles} =
+      case opts[:number_format] do
+        nil -> {current_xf.num_fmt_id, styles}
+        code -> Styles.upsert_num_fmt(styles, code)
+      end
+
+    new_xf = %CellFormat{
+      num_fmt_id: num_fmt_id,
+      font_id: font_id,
+      fill_id: fill_id,
+      border_id: border_id,
+      xf_id: current_xf.xf_id,
+      alignment: new_alignment
+    }
+
+    Styles.upsert_cell_format(styles, new_xf)
+  end
+
+  defp fetch_or_default(list, index, default) do
+    Enum.at(list, index) || default
+  end
+
+  defp styles_path_for(%Workbook{styles_path: p}) when is_binary(p), do: p
+  defp styles_path_for(_), do: "xl/styles.xml"
 
   @type range_ref :: String.t()
 
