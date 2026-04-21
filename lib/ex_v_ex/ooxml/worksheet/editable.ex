@@ -91,7 +91,8 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
 
       new_cell ->
         :ets.insert(table, {coord, new_cell})
-        %{e | row_attrs: ensure_row_attrs(row_attrs, coord)}
+        new_row_attrs = ensure_row_attrs(row_attrs, coord)
+        if new_row_attrs === row_attrs, do: e, else: %{e | row_attrs: new_row_attrs}
     end
   end
 

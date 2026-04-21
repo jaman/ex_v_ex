@@ -87,12 +87,15 @@ defmodule ExVEx.Workbook do
   """
   @spec put_sheet_tree(t(), String.t(), Editable.t()) :: t()
   def put_sheet_tree(%__MODULE__{} = book, path, %Editable{} = editable) do
-    %{
+    new_trees = Map.put(book.sheet_trees, path, editable)
+    new_dirty = MapSet.put(book.dirty_sheet_paths, path)
+
+    if new_trees === book.sheet_trees and new_dirty === book.dirty_sheet_paths and
+         book.calc_dirty do
       book
-      | sheet_trees: Map.put(book.sheet_trees, path, editable),
-        dirty_sheet_paths: MapSet.put(book.dirty_sheet_paths, path),
-        calc_dirty: true
-    }
+    else
+      %{book | sheet_trees: new_trees, dirty_sheet_paths: new_dirty, calc_dirty: true}
+    end
   end
 
   defp fetch_part(parts, key) do
