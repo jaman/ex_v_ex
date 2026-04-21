@@ -17,6 +17,10 @@ defmodule ExVEx do
   without the caller needing to opt in.
   """
 
+  alias ExVEx.Formula.Serializer, as: FormulaSerializer
+  alias ExVEx.Formula.Shift, as: FormulaShift
+  alias ExVEx.Formula.Tokenizer
+  alias ExVEx.Mutation.Shift, as: MutShift
   alias ExVEx.OOXML.SharedStrings
   alias ExVEx.OOXML.Styles
   alias ExVEx.OOXML.Styles.CellFormat
@@ -673,6 +677,101 @@ defmodule ExVEx do
 
   defp styles_path_for(%Workbook{styles_path: p}) when is_binary(p), do: p
   defp styles_path_for(_), do: "xl/styles.xml"
+
+  @doc """
+  Inserts `count` blank rows at row `at` on the given sheet. Every cell
+  at or below row `at` shifts down. Cell formulas, merged ranges,
+  defined names, and row dimensions are updated so they continue to
+  reference the same logical data.
+  """
+  @spec insert_row(Workbook.t(), sheet_name(), pos_integer(), pos_integer()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def insert_row(%Workbook{} = book, sheet, at, count \\ 1)
+      when is_integer(at) and at >= 1 and is_integer(count) and count >= 1 do
+    apply_shift(book, sheet, MutShift.insert(:row, at, count, sheet))
+  end
+
+  @doc "Deletes `count` rows starting at row `at`."
+  @spec delete_row(Workbook.t(), sheet_name(), pos_integer(), pos_integer()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def delete_row(%Workbook{} = book, sheet, at, count \\ 1)
+      when is_integer(at) and at >= 1 and is_integer(count) and count >= 1 do
+    apply_shift(book, sheet, MutShift.delete(:row, at, count, sheet))
+  end
+
+  @doc """
+  Inserts `count` blank columns at column `at` on the given sheet. Every
+  cell at or right of column `at` shifts right.
+  """
+  @spec insert_column(Workbook.t(), sheet_name(), pos_integer(), pos_integer()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def insert_column(%Workbook{} = book, sheet, at, count \\ 1)
+      when is_integer(at) and at >= 1 and is_integer(count) and count >= 1 do
+    apply_shift(book, sheet, MutShift.insert(:col, at, count, sheet))
+  end
+
+  @doc "Deletes `count` columns starting at column `at`."
+  @spec delete_column(Workbook.t(), sheet_name(), pos_integer(), pos_integer()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def delete_column(%Workbook{} = book, sheet, at, count \\ 1)
+      when is_integer(at) and at >= 1 and is_integer(count) and count >= 1 do
+    apply_shift(book, sheet, MutShift.delete(:col, at, count, sheet))
+  end
+
+  defp apply_shift(%Workbook{} = book, sheet, %MutShift{} = shift) do
+    with {:ok, _path} <- sheet_path_or_error(book, sheet) do
+      book = shift_all_sheets(book, shift)
+      book = shift_defined_names(book, shift)
+      book = %{book | calc_dirty: true}
+      {:ok, book}
+    end
+  end
+
+  defp shift_all_sheets(book, shift) do
+    Enum.reduce(book.workbook.sheets, book, &shift_one_sheet(&1, &2, shift))
+  end
+
+  defp shift_one_sheet(sheet_ref, acc, shift) do
+    with {:ok, path} <- sheet_path(acc, sheet_ref.name),
+         {:ok, editable, acc_after_fetch} <- Workbook.fetch_sheet_tree(acc, path) do
+      new_editable = Editable.shift(editable, shift, sheet_ref.name)
+      Workbook.put_sheet_tree(acc_after_fetch, path, new_editable)
+    else
+      _ -> acc
+    end
+  end
+
+  defp shift_defined_names(book, shift) do
+    new_names =
+      Enum.map(book.workbook.defined_names, fn name ->
+        sheet_context = resolve_sheet_for_name(book, name)
+
+        new_ref =
+          name.reference
+          |> Tokenizer.tokenize()
+          |> FormulaShift.apply(shift, sheet_context)
+          |> FormulaSerializer.to_string()
+
+        if new_ref == name.reference, do: name, else: %{name | reference: new_ref}
+      end)
+
+    if new_names == book.workbook.defined_names do
+      book
+    else
+      book
+      |> put_in([Access.key(:workbook), Access.key(:defined_names)], new_names)
+      |> flush_package_metadata()
+    end
+  end
+
+  defp resolve_sheet_for_name(%Workbook{workbook: %{sheets: sheets}}, %{scope: {:sheet, idx}}) do
+    case Enum.at(sheets, idx) do
+      nil -> nil
+      ref -> ref.name
+    end
+  end
+
+  defp resolve_sheet_for_name(_book, _name), do: nil
 
   @type range_ref :: String.t()
 

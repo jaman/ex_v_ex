@@ -56,22 +56,6 @@ defmodule ExVEx.Formula.Shift do
     end
   end
 
-  defp shift_range_token(%Token{} = t, shift) do
-    a = shift_reference(t.start_ref, shift)
-    b = shift_reference(t.end_ref, shift)
-
-    if a == :deleted or b == :deleted do
-      %{t | text: "#REF!"}
-    else
-      new_a = extract_ref(a, t.start_ref)
-      new_b = extract_ref(b, t.end_ref)
-
-      if new_a == t.start_ref and new_b == t.end_ref,
-        do: t,
-        else: %{t | start_ref: new_a, end_ref: new_b, text: nil}
-    end
-  end
-
   defp shift_token(%Token{kind: :row_range} = t, %Shift{axis: :row} = shift, cs) do
     if shift_applies?(t.sheet, shift.sheet, cs) do
       s = shift_axis_index(shift, t.start_row, t.start_abs?)
@@ -118,6 +102,22 @@ defmodule ExVEx.Formula.Shift do
 
   # Row shift doesn't affect col-ranges and vice versa
   defp shift_token(token, _shift, _cs), do: token
+
+  defp shift_range_token(%Token{} = t, shift) do
+    a = shift_reference(t.start_ref, shift)
+    b = shift_reference(t.end_ref, shift)
+
+    if a == :deleted or b == :deleted do
+      %{t | text: "#REF!"}
+    else
+      new_a = extract_ref(a, t.start_ref)
+      new_b = extract_ref(b, t.end_ref)
+
+      if new_a == t.start_ref and new_b == t.end_ref,
+        do: t,
+        else: %{t | start_ref: new_a, end_ref: new_b, text: nil}
+    end
+  end
 
   defp extract_index({:ok, n}, _old), do: n
   defp extract_index(:unchanged, old), do: old

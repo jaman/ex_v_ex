@@ -31,6 +31,8 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
   workbook to reclaim the tables eagerly.
   """
 
+  alias ExVEx.Formula.{Serializer, Shift, Tokenizer}
+  alias ExVEx.Mutation.Shift, as: MutShift
   alias ExVEx.Utils.{Coordinate, Range}
 
   @type cell_element :: {String.t(), list(), list()}
@@ -177,6 +179,204 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
 
   defp maybe_delete_cell({coord, _}, table, range, anchor) do
     if coord != anchor and Range.contains?(range, coord), do: :ets.delete(table, coord)
+  end
+
+  @doc """
+  Applies a structural row/column shift to every populated cell on this
+  sheet. Cells in deletion spans are removed; surviving cells have their
+  coordinates rekeyed; formulas inside cells are rewritten via
+  `ExVEx.Formula.Shift`. Merged ranges in `post_sheet_data` are shifted
+  too.
+
+  `sheet_name` is the name of the sheet this Editable represents, used
+  to scope formulas that reference the current sheet.
+  """
+  @spec shift(t(), MutShift.t(), String.t()) :: t()
+  def shift(%__MODULE__{} = e, %MutShift{} = mut_shift, sheet_name) when is_binary(sheet_name) do
+    e
+    |> shift_cells(mut_shift, sheet_name)
+    |> shift_row_attrs(mut_shift)
+    |> shift_merges(mut_shift)
+  end
+
+  defp shift_cells(%__MODULE__{cells_table: table} = e, mut_shift, sheet_name) do
+    entries = :ets.tab2list(table)
+    :ets.delete_all_objects(table)
+
+    Enum.each(entries, fn {coord, cell} ->
+      case shift_cell_entry(coord, cell, mut_shift, sheet_name) do
+        :deleted -> :ok
+        {new_coord, new_cell} -> :ets.insert(table, {new_coord, new_cell})
+      end
+    end)
+
+    e
+  end
+
+  defp shift_cell_entry(coord, cell, mut_shift, sheet_name) do
+    case shift_coord(coord, mut_shift) do
+      :deleted ->
+        :deleted
+
+      new_coord ->
+        updated_cell = rewrite_cell_formula(cell, mut_shift, sheet_name)
+        updated_cell = rewrite_cell_ref(updated_cell, new_coord)
+        {new_coord, updated_cell}
+    end
+  end
+
+  defp shift_coord({row, col}, %MutShift{axis: :row} = s) do
+    case MutShift.apply_index(s, row) do
+      {:ok, new_row} -> {new_row, col}
+      :unchanged -> {row, col}
+      :deleted -> :deleted
+    end
+  end
+
+  defp shift_coord({row, col}, %MutShift{axis: :col} = s) do
+    case MutShift.apply_index(s, col) do
+      {:ok, new_col} -> {row, new_col}
+      :unchanged -> {row, col}
+      :deleted -> :deleted
+    end
+  end
+
+  defp rewrite_cell_formula({"c", attrs, children}, mut_shift, sheet_name) do
+    new_children =
+      Enum.map(children, fn
+        {"f", f_attrs, f_children} ->
+          new_text =
+            f_children
+            |> Enum.filter(&is_binary/1)
+            |> Enum.join("")
+            |> rewrite_formula_string(mut_shift, sheet_name)
+
+          {"f", f_attrs, [new_text]}
+
+        other ->
+          other
+      end)
+
+    {"c", attrs, new_children}
+  end
+
+  defp rewrite_formula_string("", _shift, _sheet), do: ""
+
+  defp rewrite_formula_string(formula, mut_shift, sheet_name) do
+    formula
+    |> Tokenizer.tokenize()
+    |> Shift.apply(mut_shift, sheet_name)
+    |> Serializer.to_string()
+  end
+
+  defp rewrite_cell_ref({"c", attrs, children}, {row, col}) do
+    new_ref = Coordinate.to_string({row, col})
+
+    new_attrs =
+      attrs
+      |> Enum.map(fn
+        {"r", _} -> {"r", new_ref}
+        other -> other
+      end)
+
+    {"c", new_attrs, children}
+  end
+
+  defp shift_row_attrs(%__MODULE__{row_attrs: row_attrs} = e, %MutShift{axis: :row} = s) do
+    new_row_attrs =
+      Enum.reduce(row_attrs, %{}, fn {row, attrs}, acc ->
+        case MutShift.apply_index(s, row) do
+          {:ok, new_row} -> Map.put(acc, new_row, rewrite_row_attrs(attrs, new_row))
+          :unchanged -> Map.put(acc, row, attrs)
+          :deleted -> acc
+        end
+      end)
+
+    %{e | row_attrs: new_row_attrs}
+  end
+
+  defp shift_row_attrs(%__MODULE__{} = e, _), do: e
+
+  defp rewrite_row_attrs(attrs, new_row) do
+    Enum.map(attrs, fn
+      {"r", _} -> {"r", Integer.to_string(new_row)}
+      other -> other
+    end)
+  end
+
+  defp shift_merges(%__MODULE__{post_sheet_data: post} = e, %MutShift{} = s) do
+    new_post = Enum.map(post, &shift_merges_in_node(&1, s))
+    %{e | post_sheet_data: new_post}
+  end
+
+  defp shift_merges_in_node({"mergeCells", _attrs, items}, s) do
+    new_items = items |> Enum.flat_map(&shift_merge_cell(&1, s))
+    {"mergeCells", [{"count", Integer.to_string(length(new_items))}], new_items}
+  end
+
+  defp shift_merges_in_node(other, _s), do: other
+
+  defp shift_merge_cell({"mergeCell", attrs, _} = node, s) do
+    case List.keyfind(attrs, "ref", 0) do
+      {_, ref} ->
+        case Range.parse(ref) do
+          {:ok, range} -> shift_range_node(node, range, s)
+          :error -> [node]
+        end
+
+      nil ->
+        [node]
+    end
+  end
+
+  defp shift_merge_cell(other, _), do: [other]
+
+  defp shift_range_node(
+         {"mergeCell", attrs, children},
+         %Range{} = range,
+         %MutShift{axis: axis} = s
+       ) do
+    {start_idx, end_idx} =
+      case axis do
+        :row -> {elem(range.top_left, 0), elem(range.bottom_right, 0)}
+        :col -> {elem(range.top_left, 1), elem(range.bottom_right, 1)}
+      end
+
+    case {MutShift.apply_index(s, start_idx), MutShift.apply_index(s, end_idx)} do
+      {:deleted, :deleted} ->
+        []
+
+      _ ->
+        new_start = shift_or_keep(start_idx, s)
+        new_end = shift_or_keep(end_idx, s)
+
+        new_range =
+          case axis do
+            :row ->
+              %Range{
+                top_left: {new_start, elem(range.top_left, 1)},
+                bottom_right: {new_end, elem(range.bottom_right, 1)}
+              }
+
+            :col ->
+              %Range{
+                top_left: {elem(range.top_left, 0), new_start},
+                bottom_right: {elem(range.bottom_right, 0), new_end}
+              }
+          end
+
+        new_ref = Range.to_string(new_range)
+        new_attrs = List.keyreplace(attrs, "ref", 0, {"ref", new_ref})
+        [{"mergeCell", new_attrs, children}]
+    end
+  end
+
+  defp shift_or_keep(idx, shift) do
+    case MutShift.apply_index(shift, idx) do
+      {:ok, n} -> n
+      :unchanged -> idx
+      :deleted -> idx
+    end
   end
 
   @spec unmerge(t(), Range.t()) :: t()
