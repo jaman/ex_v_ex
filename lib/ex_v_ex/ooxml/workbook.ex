@@ -8,10 +8,14 @@ defmodule ExVEx.OOXML.Workbook do
   round-trips untouched unless explicitly mutated later.
   """
 
+  alias ExVEx.OOXML.Workbook.DefinedName
   alias ExVEx.OOXML.Workbook.SheetRef
 
-  @type t :: %__MODULE__{sheets: [SheetRef.t()]}
-  defstruct sheets: []
+  @type t :: %__MODULE__{
+          sheets: [SheetRef.t()],
+          defined_names: [DefinedName.t()]
+        }
+  defstruct sheets: [], defined_names: []
 
   @rels_ns "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
@@ -60,10 +64,14 @@ defmodule ExVEx.OOXML.Workbook do
   from `workbook`, preserving all other elements at the element level.
   """
   @spec serialize_into(t(), binary()) :: binary()
-  def serialize_into(%__MODULE__{sheets: sheets}, original_xml) when is_binary(original_xml) do
+  def serialize_into(%__MODULE__{} = workbook, original_xml) when is_binary(original_xml) do
     case Saxy.SimpleForm.parse_string(original_xml) do
       {:ok, {"workbook", attrs, children}} ->
-        new_children = replace_sheets(children, sheets)
+        new_children =
+          children
+          |> replace_sheets(workbook.sheets)
+          |> replace_defined_names(workbook.defined_names)
+
         tree = {"workbook", attrs, new_children}
         Saxy.encode!(tree, version: "1.0", encoding: "UTF-8", standalone: true)
 
@@ -79,6 +87,53 @@ defmodule ExVEx.OOXML.Workbook do
       nil -> insert_sheets_element(children, new_section)
       idx -> List.replace_at(children, idx, new_section)
     end
+  end
+
+  defp replace_defined_names(children, []) do
+    case Enum.find_index(children, &match?({"definedNames", _, _}, &1)) do
+      nil -> children
+      idx -> List.delete_at(children, idx)
+    end
+  end
+
+  defp replace_defined_names(children, names) do
+    new_section = defined_names_element(names)
+
+    case Enum.find_index(children, &match?({"definedNames", _, _}, &1)) do
+      nil -> insert_defined_names_element(children, new_section)
+      idx -> List.replace_at(children, idx, new_section)
+    end
+  end
+
+  defp defined_names_element(names) do
+    {"definedNames", [], Enum.map(names, &defined_name_element/1)}
+  end
+
+  defp defined_name_element(%DefinedName{} = name) do
+    attrs =
+      [{"name", name.name}]
+      |> then(fn a ->
+        case name.scope do
+          :global -> a
+          {:sheet, id} -> a ++ [{"localSheetId", Integer.to_string(id)}]
+        end
+      end)
+      |> then(fn a -> if name.hidden, do: a ++ [{"hidden", "1"}], else: a end)
+
+    {"definedName", attrs, [name.reference]}
+  end
+
+  defp insert_defined_names_element(children, new_section) do
+    idx =
+      Enum.find_index(children, fn
+        {"calcPr", _, _} -> true
+        {"pivotCaches", _, _} -> true
+        {"customWorkbookViews", _, _} -> true
+        {"extLst", _, _} -> true
+        _ -> false
+      end) || length(children)
+
+    List.insert_at(children, idx, new_section)
   end
 
   defp sheets_element(sheets) do
@@ -116,13 +171,58 @@ defmodule ExVEx.OOXML.Workbook do
   def parse(xml) when is_binary(xml) do
     case Saxy.SimpleForm.parse_string(xml) do
       {:ok, {"workbook", _attrs, children}} ->
-        {:ok, %__MODULE__{sheets: collect_sheets(children)}}
+        {:ok,
+         %__MODULE__{
+           sheets: collect_sheets(children),
+           defined_names: collect_defined_names(children)
+         }}
 
       {:ok, _other} ->
         {:error, :not_a_workbook}
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp collect_defined_names(children) do
+    children
+    |> Enum.find_value([], fn
+      {"definedNames", _, items} -> items
+      _ -> nil
+    end)
+    |> Enum.flat_map(&defined_name_from_child/1)
+  end
+
+  defp defined_name_from_child({"definedName", attrs, children}) do
+    reference =
+      children
+      |> Enum.filter(&is_binary/1)
+      |> Enum.join("")
+
+    [
+      %DefinedName{
+        name: fetch_attr!(attrs, "name"),
+        reference: reference,
+        scope: defined_name_scope(attrs),
+        hidden: bool_attr(attrs, "hidden")
+      }
+    ]
+  end
+
+  defp defined_name_from_child(_), do: []
+
+  defp defined_name_scope(attrs) do
+    case List.keyfind(attrs, "localSheetId", 0) do
+      {_, value} -> {:sheet, String.to_integer(value)}
+      nil -> :global
+    end
+  end
+
+  defp bool_attr(attrs, name) do
+    case List.keyfind(attrs, name, 0) do
+      {_, value} -> value in ["1", "true"]
+      nil -> false
     end
   end
 

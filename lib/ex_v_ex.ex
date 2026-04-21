@@ -310,6 +310,124 @@ defmodule ExVEx do
     Enum.any?(sheets, &(&1.name == name))
   end
 
+  @type name_scope :: :global | {:sheet, String.t()}
+
+  @doc """
+  Creates or replaces a defined name. `reference` can be either a static
+  range (`"Sheet1!$A$1:$A$10"`) or a formula (`"=OFFSET(Sheet1!$A$1, 0, 0,
+  COUNTA(Sheet1!$A:$A), 1)"`). Excel evaluates it at open time.
+
+  ## Options
+
+    * `:scope` — `:global` (default) for workbook-wide names, or
+      `{:sheet, sheet_name}` for sheet-local names.
+    * `:hidden` — `false` (default). Hidden names don't appear in Excel's
+      Name Manager but are still resolvable by formulas.
+  """
+  @spec define_name(Workbook.t(), String.t(), String.t(), keyword()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def define_name(%Workbook{} = book, name, reference, opts \\ [])
+      when is_binary(name) and is_binary(reference) do
+    scope = Keyword.get(opts, :scope, :global)
+    hidden = Keyword.get(opts, :hidden, false)
+
+    with {:ok, resolved_scope} <- resolve_name_scope(book, scope) do
+      entry = %WorkbookXml.DefinedName{
+        name: name,
+        reference: reference,
+        scope: resolved_scope,
+        hidden: hidden
+      }
+
+      new_names =
+        book.workbook.defined_names
+        |> Enum.reject(&same_name_and_scope?(&1, entry))
+        |> Kernel.++([entry])
+
+      book =
+        book
+        |> put_in([Access.key(:workbook), Access.key(:defined_names)], new_names)
+        |> flush_package_metadata()
+        |> Map.put(:calc_dirty, true)
+
+      {:ok, book}
+    end
+  end
+
+  @doc "Lists every defined name in the workbook."
+  @spec defined_names(Workbook.t()) :: [
+          %{name: String.t(), reference: String.t(), scope: name_scope(), hidden: boolean()}
+        ]
+  def defined_names(%Workbook{} = book) do
+    Enum.map(book.workbook.defined_names, &present_defined_name(book, &1))
+  end
+
+  @doc """
+  Removes a defined name. Returns `{:error, :unknown_name}` if no matching
+  name exists in the given scope. Scope defaults to `:global` to match
+  `define_name/4`'s default.
+  """
+  @spec remove_defined_name(Workbook.t(), String.t(), keyword()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def remove_defined_name(%Workbook{} = book, name, opts \\ []) when is_binary(name) do
+    scope = Keyword.get(opts, :scope, :global)
+
+    with {:ok, resolved_scope} <- resolve_name_scope(book, scope) do
+      do_remove_defined_name(book, name, resolved_scope)
+    end
+  end
+
+  defp do_remove_defined_name(book, name, resolved_scope) do
+    match? = &(&1.name == name and &1.scope == resolved_scope)
+
+    if Enum.any?(book.workbook.defined_names, match?) do
+      new_names = Enum.reject(book.workbook.defined_names, match?)
+
+      book =
+        book
+        |> put_in([Access.key(:workbook), Access.key(:defined_names)], new_names)
+        |> flush_package_metadata()
+        |> Map.put(:calc_dirty, true)
+
+      {:ok, book}
+    else
+      {:error, :unknown_name}
+    end
+  end
+
+  defp resolve_name_scope(_book, :global), do: {:ok, :global}
+
+  defp resolve_name_scope(%Workbook{workbook: %{sheets: sheets}}, {:sheet, sheet_name})
+       when is_binary(sheet_name) do
+    case Enum.find_index(sheets, &(&1.name == sheet_name)) do
+      nil -> {:error, :unknown_sheet}
+      idx -> {:ok, {:sheet, idx}}
+    end
+  end
+
+  defp resolve_name_scope(_book, _), do: {:error, :invalid_scope}
+
+  defp same_name_and_scope?(a, b), do: a.name == b.name and a.scope == b.scope
+
+  defp present_defined_name(
+         %Workbook{workbook: %{sheets: sheets}},
+         %WorkbookXml.DefinedName{} = n
+       ) do
+    scope =
+      case n.scope do
+        :global ->
+          :global
+
+        {:sheet, idx} ->
+          case Enum.at(sheets, idx) do
+            nil -> {:sheet, idx}
+            ref -> {:sheet, ref.name}
+          end
+      end
+
+    %{name: n.name, reference: n.reference, scope: scope, hidden: n.hidden}
+  end
+
   defp next_sheet_number(%Workbook{parts: parts}) do
     existing =
       parts
