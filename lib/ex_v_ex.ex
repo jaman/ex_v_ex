@@ -22,6 +22,7 @@ defmodule ExVEx do
   alias ExVEx.Formula.Tokenizer
   alias ExVEx.Mutation.Shift, as: MutShift
   alias ExVEx.OOXML.SharedStrings
+  alias ExVEx.OOXML.SheetSatellites
   alias ExVEx.OOXML.Styles
   alias ExVEx.OOXML.Styles.CellFormat
   alias ExVEx.OOXML.Workbook, as: WorkbookXml
@@ -718,6 +719,27 @@ defmodule ExVEx do
     apply_shift(book, sheet, MutShift.delete(:col, at, count, sheet))
   end
 
+  @doc """
+  Drops the `<dimension>` element from a sheet so Excel recomputes the
+  used range on next open. Useful after bulk mutations where the cached
+  dimension no longer reflects the live cell extent. No-op if the sheet
+  has no `<dimension>` element.
+  """
+  @spec clear_sheet_dimension(Workbook.t(), sheet_name()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def clear_sheet_dimension(%Workbook{} = book, sheet) do
+    with {:ok, path} <- sheet_path_or_error(book, sheet),
+         {:ok, editable, book} <- Workbook.fetch_sheet_tree(book, path) do
+      new_editable = Editable.clear_dimension(editable)
+
+      if new_editable === editable do
+        {:ok, book}
+      else
+        {:ok, Workbook.put_sheet_tree(book, path, new_editable)}
+      end
+    end
+  end
+
   defp apply_shift(%Workbook{} = book, sheet, %MutShift{} = shift) do
     with {:ok, _path} <- sheet_path_or_error(book, sheet) do
       book = shift_all_sheets(book, shift)
@@ -735,7 +757,10 @@ defmodule ExVEx do
     with {:ok, path} <- sheet_path(acc, sheet_ref.name),
          {:ok, editable, acc_after_fetch} <- Workbook.fetch_sheet_tree(acc, path) do
       new_editable = Editable.shift(editable, shift, sheet_ref.name)
-      Workbook.put_sheet_tree(acc_after_fetch, path, new_editable)
+
+      acc_after_fetch
+      |> Workbook.put_sheet_tree(path, new_editable)
+      |> SheetSatellites.shift(path, shift)
     else
       _ -> acc
     end

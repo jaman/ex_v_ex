@@ -33,6 +33,7 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
 
   alias ExVEx.Formula.{Serializer, Shift, Tokenizer}
   alias ExVEx.Mutation.Shift, as: MutShift
+  alias ExVEx.OOXML.{AutoFilter, ConditionalFormatting, DataValidations}
   alias ExVEx.Utils.{Coordinate, Range}
 
   @type cell_element :: {String.t(), list(), list()}
@@ -196,7 +197,7 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
     e
     |> shift_cells(mut_shift, sheet_name)
     |> shift_row_attrs(mut_shift)
-    |> shift_merges(mut_shift)
+    |> shift_post_sheet_data(mut_shift, sheet_name)
   end
 
   defp shift_cells(%__MODULE__{cells_table: table} = e, mut_shift, sheet_name) do
@@ -304,17 +305,29 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
     end)
   end
 
-  defp shift_merges(%__MODULE__{post_sheet_data: post} = e, %MutShift{} = s) do
-    new_post = Enum.map(post, &shift_merges_in_node(&1, s))
+  defp shift_post_sheet_data(%__MODULE__{post_sheet_data: post} = e, %MutShift{} = s, sheet_name) do
+    new_post = Enum.map(post, &shift_post_node(&1, s, sheet_name))
     %{e | post_sheet_data: new_post}
   end
 
-  defp shift_merges_in_node({"mergeCells", _attrs, items}, s) do
+  defp shift_post_node({"mergeCells", _attrs, items}, s, _sheet) do
     new_items = items |> Enum.flat_map(&shift_merge_cell(&1, s))
     {"mergeCells", [{"count", Integer.to_string(length(new_items))}], new_items}
   end
 
-  defp shift_merges_in_node(other, _s), do: other
+  defp shift_post_node({"conditionalFormatting", attrs, children}, s, sheet_name) do
+    ConditionalFormatting.shift_node({"conditionalFormatting", attrs, children}, s, sheet_name)
+  end
+
+  defp shift_post_node({"dataValidations", attrs, children}, s, sheet_name) do
+    DataValidations.shift_node({"dataValidations", attrs, children}, s, sheet_name)
+  end
+
+  defp shift_post_node({"autoFilter", attrs, children}, s, _sheet_name) do
+    AutoFilter.shift_node({"autoFilter", attrs, children}, s)
+  end
+
+  defp shift_post_node(other, _s, _sheet), do: other
 
   defp shift_merge_cell({"mergeCell", attrs, _} = node, s) do
     case List.keyfind(attrs, "ref", 0) do
@@ -376,6 +389,18 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
       {:ok, n} -> n
       :unchanged -> idx
       :deleted -> idx
+    end
+  end
+
+  @doc """
+  Drops the `<dimension>` element from the worksheet so Excel recomputes
+  the used range on open. No-op if the sheet has no `<dimension>`.
+  """
+  @spec clear_dimension(t()) :: t()
+  def clear_dimension(%__MODULE__{pre_sheet_data: pre} = e) do
+    case Enum.split_with(pre, &match?({"dimension", _, _}, &1)) do
+      {[], _kept} -> e
+      {_dropped, kept} -> %{e | pre_sheet_data: kept}
     end
   end
 

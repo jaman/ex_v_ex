@@ -94,7 +94,9 @@ defmodule ExVEx.OOXML.SharedStrings do
     items =
       for i <- 0..(count - 1)//1 do
         [{^i, text}] = :ets.lookup(table, i)
-        Saxy.XML.element("si", [], [Saxy.XML.element("t", text_attrs(text), [text])])
+        Saxy.XML.element("si", [], [
+          Saxy.XML.element("t", text_attrs(text), [Saxy.XML.characters(text)])
+        ])
       end
 
     root =

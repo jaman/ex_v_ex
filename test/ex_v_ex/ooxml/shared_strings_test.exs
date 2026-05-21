@@ -65,4 +65,25 @@ defmodule ExVEx.OOXML.SharedStringsTest do
       assert {:error, _} = SharedStrings.parse("<sst><bad></sst>")
     end
   end
+
+  @empty_sst """
+  <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="0" uniqueCount="0"/>
+  """
+
+  describe "serialize/1" do
+    test "escapes XML special characters in interned strings" do
+      {:ok, sst} = SharedStrings.parse(@empty_sst)
+      {0, sst} = SharedStrings.intern(sst, "A & B")
+      {1, sst} = SharedStrings.intern(sst, "<tag>")
+      {2, sst} = SharedStrings.intern(sst, ~s|she said "hi" & 'bye'|)
+
+      xml = SharedStrings.serialize(sst)
+
+      assert {:ok, reparsed} = SharedStrings.parse(xml)
+      assert SharedStrings.get(reparsed, 0) == {:ok, "A & B"}
+      assert SharedStrings.get(reparsed, 1) == {:ok, "<tag>"}
+      assert SharedStrings.get(reparsed, 2) == {:ok, ~s|she said "hi" & 'bye'|}
+    end
+  end
 end

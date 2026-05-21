@@ -6,6 +6,62 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-21
+
+### Added
+
+- `ExVEx.clear_sheet_dimension/2` — drops the `<dimension>` element
+  from a sheet so Excel recomputes the used range on next open. Use
+  after bulk mutations where the cached extent no longer matches.
+
+### Fixed
+
+- `ExVEx.OOXML.SharedStrings.serialize/1` now XML-escapes shared-string
+  text. Strings containing `&`, `<`, `>`, `"`, or `'` were emitted as
+  raw bytes through `Saxy.XML.element/3`, producing invalid XML that
+  Excel rejected as "corrupt." Any workbook touched by ExVEx where a
+  cell value contained one of those characters was affected on save.
+  Re-saving an affected workbook with 0.2.0 produces a clean file.
+
+### Changed (breaking)
+
+- `ExVEx.Workbook.put_sheet_tree/3` now takes an
+  `%ExVEx.OOXML.Worksheet.Editable{}` as its third argument instead of
+  a raw `{"worksheet", attrs, children}` SimpleForm tuple, and
+  `book.sheet_trees` likewise stores `Editable` structs. Callers
+  reaching past `ExVEx.*` into `Workbook.put_sheet_tree/3` or
+  `book.sheet_trees` directly will need to migrate. The public
+  `ExVEx.*` API is unchanged.
+
+### Added — structural row/column mutations (umya-spreadsheet parity)
+
+- `ExVEx.insert_row/4`, `ExVEx.delete_row/4`, `ExVEx.insert_column/4`,
+  `ExVEx.delete_column/4`. A shift on a sheet now cascades through every
+  location that can carry a reference to a row or column:
+
+  - Cell grid (rekeyed ETS entries; cells inside a deletion span are
+    dropped).
+  - Cell formulas (rewritten via `ExVEx.Formula.Shift`; references
+    inside deleted rows/cols become `#REF!`).
+  - Row dimension attributes (`<row r="…">`).
+  - Merged ranges.
+  - Workbook-level defined names.
+  - Conditional formatting `sqref` + `<formula>` children
+    (`ExVEx.OOXML.ConditionalFormatting`).
+  - Data validations `sqref` + `<formula1>` / `<formula2>` children
+    (`ExVEx.OOXML.DataValidations`).
+  - AutoFilter ranges (`ExVEx.OOXML.AutoFilter`).
+  - Comments (`xl/comments*.xml`) — each `<comment ref="…">` is shifted
+    and comments inside a deletion span are dropped.
+  - Tables (`xl/tables/table*.xml`) — the table ref plus any embedded
+    `<autoFilter>` / `<sortState>`.
+  - Drawings (`xl/drawings/drawing*.xml`) — `<xdr:from>` / `<xdr:to>`
+    row and column anchors.
+
+  Satellite parts are located through each worksheet's `.rels` file
+  (`ExVEx.OOXML.SheetSatellites`) so the cascade reaches every linked
+  document without the workbook having to model them in full.
+
 ### Changed (performance — second round)
 
 Elixir bulk-write throughput now beats Python (openpyxl) on the

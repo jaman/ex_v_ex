@@ -56,7 +56,7 @@ ExVEx fills that gap in pure Elixir.
 
 **v0.1 — pre-alpha.** Core read/write/round-trip is solid and externally
 validated against [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
-(Rust). 125 tests, zero credo issues, zero compile warnings.
+(Rust). 239 tests, zero credo issues, zero compile warnings.
 
 ### What works
 
@@ -76,12 +76,20 @@ validated against [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
 - Get cell formula: `get_formula/3`
 - Merge / unmerge cells with configurable overlap and value-preservation
   behaviour (`merge_cells/3,4`, `unmerge_cells/3,4`, `merged_ranges/2`)
+- Style mutation (`put_style/4` — fluent font / fill / border / alignment
+  / number-format merge)
+- Defined names (`define_name/4`, `defined_names/1`, `remove_defined_name/3`)
+- Structural row/column mutation (`insert_row/4`, `delete_row/4`,
+  `insert_column/4`, `delete_column/4`). Cascades through formulas,
+  merged ranges, defined names, conditional formatting, data validations,
+  auto-filters, comments, tables, and drawing anchors — so formulas,
+  charts, and comments keep pointing at the same logical cells after
+  the shift
 
 ### Not yet
 
-- Style mutation (set bold, change font, etc.)
-- Row/column insertion, defined names
-- Charts, images, pivot tables, comments
+- Charts, pivot tables (pass through untouched but no mutation API)
+- Embedded images (pass through untouched)
 
 ## Installation
 
