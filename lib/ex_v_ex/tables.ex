@@ -254,10 +254,11 @@ defmodule ExVEx.Tables do
     end
   end
 
-  defp check_header_row_stays(%Table{ref: %Range{top_left: {top, _}}}, %Range{top_left: {top, _}}),
-       do: :ok
-
-  defp check_header_row_stays(_table, _range), do: {:error, :header_row_must_stay}
+  defp check_header_row_stays(%Table{ref: current}, %Range{} = new_range) do
+    {current_top, _} = current.top_left
+    {new_top, _} = new_range.top_left
+    if current_top == new_top, do: :ok, else: {:error, :header_row_must_stay}
+  end
 
   defp move_totals_row(book, %Entry{table: %Table{totals_row_count: 0}}, _range), do: {:ok, book}
 
