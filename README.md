@@ -111,7 +111,7 @@ validated against [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
 
 ```elixir
 def deps do
-  [{:ex_v_ex, "~> 0.1.0"}]
+  [{:ex_v_ex, "~> 0.2"}]
 end
 ```
 
