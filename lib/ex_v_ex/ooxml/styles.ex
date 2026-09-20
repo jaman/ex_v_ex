@@ -208,8 +208,6 @@ defmodule ExVEx.OOXML.Styles do
 
   defp underline_element(_), do: {"u", [], []}
 
-  defp color_element(_tag, nil), do: nil
-
   defp color_element(tag, %Color{kind: :rgb, value: value}),
     do: {tag, [{"rgb", value}], []}
 
@@ -270,13 +268,7 @@ defmodule ExVEx.OOXML.Styles do
     do: {tag, [{"style", Atom.to_string(style)}], []}
 
   defp side_element(tag, %Side{style: style, color: color}) do
-    children =
-      case color_element("color", color) do
-        nil -> []
-        elem -> [elem]
-      end
-
-    {tag, [{"style", Atom.to_string(style)}], children}
+    {tag, [{"style", Atom.to_string(style)}], [color_element("color", color)]}
   end
 
   defp append_if(list, false, _), do: list

@@ -10,11 +10,22 @@ defmodule ExVEx.Utils.Coordinate do
   @type col :: pos_integer()
   @type t :: {row(), col()}
 
+  @max_row 1_048_576
+  @max_col 16_384
+
   @spec parse(String.t()) :: {:ok, t()} | :error
   def parse(binary) when is_binary(binary) do
     with {letters, digits} <- split_letters_and_digits(binary),
-         {:ok, row} <- parse_row(digits) do
-      {:ok, {row, column_number(letters)}}
+         {:ok, row} <- parse_row(digits),
+         {:ok, col} <- parse_col(letters) do
+      {:ok, {row, col}}
+    end
+  end
+
+  defp parse_col(letters) do
+    case column_number(letters) do
+      col when col <= @max_col -> {:ok, col}
+      _ -> :error
     end
   end
 
@@ -56,7 +67,7 @@ defmodule ExVEx.Utils.Coordinate do
 
   defp parse_row(digits) do
     case Integer.parse(digits) do
-      {n, ""} when n >= 1 -> {:ok, n}
+      {n, ""} when n >= 1 and n <= @max_row -> {:ok, n}
       _ -> :error
     end
   end

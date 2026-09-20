@@ -53,6 +53,43 @@ defmodule ExVEx.Packaging.Relationships do
   defp target_mode_attr(:external), do: [{"TargetMode", "External"}]
   defp target_mode_attr(_), do: []
 
+  @doc "The path of the `.rels` file that declares relationships for `part_path`."
+  @spec rels_path_for(String.t()) :: String.t()
+  def rels_path_for(part_path) do
+    case Path.dirname(part_path) do
+      "." -> "_rels/#{Path.basename(part_path)}.rels"
+      dir -> "#{dir}/_rels/#{Path.basename(part_path)}.rels"
+    end
+  end
+
+  @doc "Appends a relationship, returning the new struct."
+  @spec append(t(), Relationship.t()) :: t()
+  def append(%__MODULE__{entries: entries} = rels, %Relationship{} = rel) do
+    %{rels | entries: entries ++ [rel]}
+  end
+
+  @doc "Removes the relationship with the given id, if present."
+  @spec delete(t(), String.t()) :: t()
+  def delete(%__MODULE__{entries: entries} = rels, id) do
+    %{rels | entries: Enum.reject(entries, &(&1.id == id))}
+  end
+
+  @doc "The lowest unused `rIdN` identifier."
+  @spec next_id(t()) :: String.t()
+  def next_id(%__MODULE__{entries: entries}) do
+    max_n = entries |> Enum.flat_map(&id_number/1) |> Enum.max(fn -> 0 end)
+    "rId#{max_n + 1}"
+  end
+
+  defp id_number(%Relationship{id: "rId" <> rest}) do
+    case Integer.parse(rest) do
+      {n, ""} -> [n]
+      _ -> []
+    end
+  end
+
+  defp id_number(_), do: []
+
   @spec get(t(), String.t()) :: {:ok, Relationship.t()} | :error
   def get(%__MODULE__{entries: entries}, id) do
     case Enum.find(entries, &(&1.id == id)) do

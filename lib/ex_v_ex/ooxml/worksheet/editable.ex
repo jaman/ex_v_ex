@@ -31,7 +31,7 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
   workbook to reclaim the tables eagerly.
   """
 
-  alias ExVEx.Formula.{Serializer, Shift, Tokenizer}
+  alias ExVEx.Formula.{Serializer, Shift, Token, Tokenizer}
   alias ExVEx.Mutation.Shift, as: MutShift
   alias ExVEx.OOXML.{AutoFilter, ConditionalFormatting, DataValidations}
   alias ExVEx.Utils.{Coordinate, Range}
@@ -182,6 +182,87 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
     if coord != anchor and Range.contains?(range, coord), do: :ets.delete(table, coord)
   end
 
+  @doc "Moves the raw cell element at `from` to `to`, replacing whatever was at `to`."
+  @spec move_cell(t(), Coordinate.t(), Coordinate.t()) :: t()
+  def move_cell(%__MODULE__{cells_table: table, row_attrs: row_attrs} = e, from, to) do
+    case :ets.lookup(table, from) do
+      [{^from, cell}] ->
+        :ets.delete(table, from)
+        :ets.insert(table, {to, rewrite_cell_ref(cell, to)})
+        new_row_attrs = ensure_row_attrs(row_attrs, to)
+        if new_row_attrs === row_attrs, do: e, else: %{e | row_attrs: new_row_attrs}
+
+      [] ->
+        e
+    end
+  end
+
+  @doc "Relationship ids listed under `<tableParts>`, in document order."
+  @spec table_part_rel_ids(t()) :: [String.t()]
+  def table_part_rel_ids(%__MODULE__{post_sheet_data: post}) do
+    case Enum.find(post, &match?({"tableParts", _, _}, &1)) do
+      {"tableParts", _, items} -> Enum.flat_map(items, &table_part_rel_id/1)
+      nil -> []
+    end
+  end
+
+  @spec add_table_part(t(), String.t()) :: t()
+  def add_table_part(%__MODULE__{post_sheet_data: post} = e, rel_id) when is_binary(rel_id) do
+    new_item = {"tablePart", [{"r:id", rel_id}], []}
+
+    new_post =
+      case Enum.find_index(post, &match?({"tableParts", _, _}, &1)) do
+        nil ->
+          index = Enum.find_index(post, &match?({"extLst", _, _}, &1)) || length(post)
+          List.insert_at(post, index, table_parts_element([new_item]))
+
+        index ->
+          {"tableParts", _, items} = Enum.at(post, index)
+          List.replace_at(post, index, table_parts_element(items ++ [new_item]))
+      end
+
+    %{e | post_sheet_data: new_post}
+  end
+
+  @spec remove_table_part(t(), String.t()) :: t()
+  def remove_table_part(%__MODULE__{post_sheet_data: post} = e, rel_id) when is_binary(rel_id) do
+    new_post =
+      Enum.flat_map(post, fn
+        {"tableParts", _, items} ->
+          case Enum.reject(items, &(table_part_rel_id(&1) == [rel_id])) do
+            [] -> []
+            kept -> [table_parts_element(kept)]
+          end
+
+        other ->
+          [other]
+      end)
+
+    %{e | post_sheet_data: new_post}
+  end
+
+  @doc "Declares `xmlns:prefix` on the `<worksheet>` root unless it is already present."
+  @spec ensure_namespace(t(), String.t(), String.t()) :: t()
+  def ensure_namespace(%__MODULE__{worksheet_attrs: attrs} = e, name, uri) do
+    case List.keyfind(attrs, name, 0) do
+      nil -> %{e | worksheet_attrs: attrs ++ [{name, uri}]}
+      _ -> e
+    end
+  end
+
+  defp table_parts_element(items) do
+    {"tableParts", [{"count", Integer.to_string(length(items))}], items}
+  end
+
+  defp table_part_rel_id({"tablePart", attrs, _}) do
+    case List.keyfind(attrs, "r:id", 0) do
+      {_, id} -> [id]
+      nil -> []
+    end
+  end
+
+  defp table_part_rel_id(_), do: []
+
   @doc """
   Applies a structural row/column shift to every populated cell on this
   sheet. Cells in deletion spans are removed; surviving cells have their
@@ -199,6 +280,120 @@ defmodule ExVEx.OOXML.Worksheet.Editable do
     |> shift_row_attrs(mut_shift)
     |> shift_post_sheet_data(mut_shift, sheet_name)
   end
+
+  @doc """
+  Rewrites every formula on the sheet with `fun`, which receives the
+  formula's token list and the coordinate of the cell holding it (`nil`
+  for conditional-formatting and data-validation formulas) and returns a
+  token list. Returns `{editable, changed?}`.
+  """
+  @spec rewrite_formulas(t(), ([Token.t()], Coordinate.t() | nil -> [Token.t()])) ::
+          {t(), boolean()}
+  def rewrite_formulas(%__MODULE__{cells_table: table} = e, fun) when is_function(fun, 2) do
+    cells_changed? =
+      Enum.reduce(:ets.tab2list(table), false, fn {coord, cell}, changed? ->
+        rewritten = rewrite_cell_formula_with(cell, &fun.(&1, coord))
+
+        if rewritten === cell do
+          changed?
+        else
+          :ets.insert(table, {coord, rewritten})
+          true
+        end
+      end)
+
+    sheet_level = fn tokens -> fun.(tokens, nil) end
+    new_post = Enum.map(e.post_sheet_data, &rewrite_post_node_formulas(&1, sheet_level))
+    post_changed? = new_post !== e.post_sheet_data
+    {%{e | post_sheet_data: new_post}, cells_changed? or post_changed?}
+  end
+
+  defp rewrite_cell_formula_with({"c", attrs, children}, fun) do
+    {"c", attrs, Enum.map(children, &rewrite_formula_node(&1, "f", fun))}
+  end
+
+  defp rewrite_post_node_formulas({"conditionalFormatting", attrs, rules}, fun) do
+    new_rules =
+      Enum.map(rules, fn
+        {"cfRule", rule_attrs, rule_children} ->
+          {"cfRule", rule_attrs,
+           Enum.map(rule_children, &rewrite_formula_node(&1, "formula", fun))}
+
+        other ->
+          other
+      end)
+
+    {"conditionalFormatting", attrs, new_rules}
+  end
+
+  defp rewrite_post_node_formulas({"dataValidations", attrs, validations}, fun) do
+    new_validations =
+      Enum.map(validations, fn
+        {"dataValidation", dv_attrs, dv_children} ->
+          {"dataValidation", dv_attrs,
+           Enum.map(dv_children, fn
+             {tag, _, _} = node when tag in ["formula1", "formula2"] ->
+               rewrite_formula_node(node, tag, fun)
+
+             other ->
+               other
+           end)}
+
+        other ->
+          other
+      end)
+
+    {"dataValidations", attrs, new_validations}
+  end
+
+  defp rewrite_post_node_formulas(other, _fun), do: other
+
+  defp rewrite_formula_node({tag, attrs, children}, tag, fun) do
+    text = children |> Enum.filter(&is_binary/1) |> Enum.join("")
+    new_text = rewrite_formula_text(text, fun)
+    if new_text == text, do: {tag, attrs, children}, else: {tag, attrs, [new_text]}
+  end
+
+  defp rewrite_formula_node(other, _tag, _fun), do: other
+
+  defp rewrite_formula_text("", _fun), do: ""
+
+  defp rewrite_formula_text(text, fun) do
+    text |> Tokenizer.tokenize() |> fun.() |> Serializer.to_string()
+  end
+
+  @doc """
+  Rewrites every formula on this sheet for a shift that happened on a
+  different sheet. Cells, rows, merged ranges, and other structure stay
+  where they are; only references into the shifted sheet change.
+  """
+  @spec shift_formulas(t(), MutShift.t(), String.t()) :: {t(), boolean()}
+  def shift_formulas(%__MODULE__{cells_table: table} = e, %MutShift{} = mut_shift, sheet_name) do
+    cells_changed? =
+      Enum.reduce(:ets.tab2list(table), false, fn {coord, cell}, changed? ->
+        rewritten = rewrite_cell_formula(cell, mut_shift, sheet_name)
+
+        if rewritten === cell do
+          changed?
+        else
+          :ets.insert(table, {coord, rewritten})
+          true
+        end
+      end)
+
+    new_post = Enum.map(e.post_sheet_data, &shift_post_node_formulas(&1, mut_shift, sheet_name))
+    {%{e | post_sheet_data: new_post}, cells_changed? or new_post !== e.post_sheet_data}
+  end
+
+  defp shift_post_node_formulas({"conditionalFormatting", _, _} = node, s, sheet_name) do
+    ConditionalFormatting.shift_formulas(node, s, sheet_name)
+  end
+
+  defp shift_post_node_formulas({"dataValidations", _, _} = node, s, sheet_name) do
+    DataValidations.shift_formulas(node, s, sheet_name)
+  end
+
+  defp shift_post_node_formulas(other, _s, _sheet_name), do: other
 
   defp shift_cells(%__MODULE__{cells_table: table} = e, mut_shift, sheet_name) do
     entries = :ets.tab2list(table)

@@ -31,7 +31,9 @@ defmodule ExVEx.ClearSheetDimensionTest do
       {:ok, book} = ExVEx.open(Fixtures.path("cells.xlsx"))
       {:ok, book} = ExVEx.clear_sheet_dimension(book, "Sheet1")
 
-      out = Path.join(System.tmp_dir!(), "exvex_clear_dim_#{System.unique_integer([:positive])}.xlsx")
+      out =
+        Path.join(System.tmp_dir!(), "exvex_clear_dim_#{System.unique_integer([:positive])}.xlsx")
+
       on_exit(fn -> File.rm_rf!(out) end)
       :ok = ExVEx.save(book, out)
 

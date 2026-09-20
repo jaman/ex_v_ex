@@ -3,12 +3,11 @@ defmodule ExVEx.Formula.Tokenizer do
   Tokenises an Excel formula string into a flat list of
   `ExVEx.Formula.Token` records.
 
-  The goal isn't to build an AST — Excel formulas are too complex for
-  that in a pure-Elixir budget — but to flatten the input into a stream
-  where cell and range references are structured and everything else
-  passes through as literal text. That's enough to rewrite references
-  on row/column insert without understanding operator precedence or
-  function semantics.
+  The output is not an AST: cell, range, and structured references are
+  emitted as structured tokens and everything else passes through as
+  literal text. That is enough to rewrite references on row/column
+  insert without understanding operator precedence or function
+  semantics.
 
   Supported reference forms:
 
@@ -18,12 +17,24 @@ defmodule ExVEx.Formula.Tokenizer do
     * Column ranges:          `A:C`
     * Sheet prefix:           `Sheet1!A1`, `'Data Sheet'!A1`
     * 3D sheet spans:         `Sheet1:Sheet3!A1`
+    * Structured references:  `Table1[Amount]`, `[@Price]`,
+                              `Sales[[#Headers],[Q4]]`
 
+  An identifier that merely resembles a reference — a function name
+  such as `LOG10(`, a defined name such as `Table1`, or a dotted name
+  such as `My.A1` — is emitted as a literal, never as a cell reference.
   String literals (`"text"`) and quoted sheet names (`'Sheet Name'`)
   are preserved verbatim.
   """
 
   alias ExVEx.Formula.{Reference, Token}
+
+  defguardp identifier_start?(ch)
+            when ch in ?A..?Z or ch in ?a..?z or ch == ?$ or ch in ?0..?9 or ch == ?_
+
+  defguardp identifier_char?(ch)
+            when ch in ?A..?Z or ch in ?a..?z or ch in ?0..?9 or ch == ?_ or ch == ?. or
+                   ch == ?$
 
   @spec tokenize(String.t()) :: [Token.t()]
   def tokenize(formula) when is_binary(formula) do
@@ -36,15 +47,12 @@ defmodule ExVEx.Formula.Tokenizer do
     Enum.reverse([%Token{kind: :literal, text: literal} | acc])
   end
 
-  # String literal "…"
   defp tokenize(<<?", rest::binary>>, literal, acc) do
     {string, rest} = consume_string(rest, <<"\"">>)
     acc = flush_literal(literal, acc)
     tokenize(rest, <<>>, [%Token{kind: :literal, text: string} | acc])
   end
 
-  # Quoted sheet name 'Sheet Name'! — but only as a reference prefix,
-  # not as a standalone literal. We detect by checking the ! follows.
   defp tokenize(<<?', _::binary>> = input, literal, acc) do
     case parse_quoted_sheet_ref(input) do
       {:ok, token, rest} ->
@@ -52,28 +60,96 @@ defmodule ExVEx.Formula.Tokenizer do
         tokenize(rest, <<>>, [token | acc])
 
       :error ->
-        # No valid reference after the quoted sheet, treat the quote as a
-        # literal char and continue
         <<ch::utf8, rest::binary>> = input
         tokenize(rest, literal <> <<ch::utf8>>, acc)
     end
   end
 
-  defp tokenize(<<ch::utf8, _::binary>> = input, literal, acc)
-       when ch in ?A..?Z or ch in ?a..?z or ch == ?$ or ch in ?0..?9 do
-    case parse_reference_or_sheet_prefixed(input) do
-      {:ok, token, rest} ->
+  defp tokenize(<<?[, _::binary>> = input, literal, acc) do
+    case consume_bracket(input) do
+      {:ok, body, rest} ->
         acc = flush_literal(literal, acc)
-        tokenize(rest, <<>>, [token | acc])
+        tokenize(rest, <<>>, [structured_ref(nil, body) | acc])
 
       :error ->
-        <<c, rest::binary>> = input
-        tokenize(rest, literal <> <<c>>, acc)
+        <<_, rest::binary>> = input
+        tokenize(rest, literal <> "[", acc)
+    end
+  end
+
+  defp tokenize(<<ch::utf8, _::binary>> = input, literal, acc) when identifier_start?(ch) do
+    case parse_reference_or_sheet_prefixed(input) do
+      {:ok, token, rest} ->
+        accept_or_fall_back(token, rest, input, literal, acc)
+
+      :error ->
+        tokenize_identifier(input, literal, acc)
     end
   end
 
   defp tokenize(<<ch::utf8, rest::binary>>, literal, acc) do
     tokenize(rest, literal <> <<ch::utf8>>, acc)
+  end
+
+  defp accept_or_fall_back(_token, <<ch::utf8, _::binary>>, input, literal, acc)
+       when identifier_char?(ch) or ch == ?( or ch == ?[ do
+    tokenize_identifier(input, literal, acc)
+  end
+
+  defp accept_or_fall_back(token, rest, _input, literal, acc) do
+    acc = flush_literal(literal, acc)
+    tokenize(rest, <<>>, [token | acc])
+  end
+
+  defp tokenize_identifier(input, literal, acc) do
+    {name, rest} = consume_identifier(input, <<>>)
+
+    case consume_bracket(rest) do
+      {:ok, body, rest_after_bracket} ->
+        acc = flush_literal(literal, acc)
+        tokenize(rest_after_bracket, <<>>, [structured_ref(name, body) | acc])
+
+      :error ->
+        tokenize(rest, literal <> name, acc)
+    end
+  end
+
+  defp consume_identifier(<<ch::utf8, rest::binary>>, buf) when identifier_char?(ch) do
+    consume_identifier(rest, buf <> <<ch::utf8>>)
+  end
+
+  defp consume_identifier(rest, buf), do: {buf, rest}
+
+  defp structured_ref(table, body) do
+    %Token{
+      kind: :structured_ref,
+      table: table,
+      body: body,
+      text: (table || "") <> "[" <> body <> "]"
+    }
+  end
+
+  defp consume_bracket(<<?[, rest::binary>>), do: consume_bracket(rest, 1, <<>>)
+  defp consume_bracket(_), do: :error
+
+  defp consume_bracket(<<>>, _depth, _buf), do: :error
+
+  defp consume_bracket(<<?', ch::utf8, rest::binary>>, depth, buf) do
+    consume_bracket(rest, depth, buf <> <<?', ch::utf8>>)
+  end
+
+  defp consume_bracket(<<?], rest::binary>>, 1, buf), do: {:ok, buf, rest}
+
+  defp consume_bracket(<<?], rest::binary>>, depth, buf) do
+    consume_bracket(rest, depth - 1, buf <> "]")
+  end
+
+  defp consume_bracket(<<?[, rest::binary>>, depth, buf) do
+    consume_bracket(rest, depth + 1, buf <> "[")
+  end
+
+  defp consume_bracket(<<ch::utf8, rest::binary>>, depth, buf) do
+    consume_bracket(rest, depth, buf <> <<ch::utf8>>)
   end
 
   defp flush_literal(<<>>, acc), do: acc
@@ -87,38 +163,26 @@ defmodule ExVEx.Formula.Tokenizer do
 
   defp consume_string(<<>>, buf), do: {buf, <<>>}
 
-  # Parses 'Sheet Name'! or 'S1:S3'! followed by a reference
   defp parse_quoted_sheet_ref(input) do
     case Regex.run(~r/^'((?:[^']|'')+)'!/, input) do
       [sheet_prefix, sheet_inner] ->
         sheet = String.replace(sheet_inner, "''", "'")
         rest = String.slice(input, String.length(sheet_prefix)..-1//1)
-        parse_ref_after_sheet(sheet, rest, sheet_prefix)
+        parse_bare_reference(rest, sheet, sheet_prefix)
 
       nil ->
         :error
     end
   end
 
-  # Parses Sheet1!A1 or Sheet1:Sheet3!A1 or bare A1
   defp parse_reference_or_sheet_prefixed(input) do
     case Regex.run(~r/^([A-Za-z_][A-Za-z0-9_.]*(?::[A-Za-z_][A-Za-z0-9_.]*)?)!/, input) do
       [sheet_prefix, sheet_name] ->
         rest = String.slice(input, String.length(sheet_prefix)..-1//1)
-        parse_ref_after_sheet(sheet_name, rest, sheet_prefix)
+        parse_bare_reference(rest, sheet_name, sheet_prefix)
 
       nil ->
         parse_bare_reference(input, nil, "")
-    end
-  end
-
-  defp parse_ref_after_sheet(sheet, rest, sheet_prefix) do
-    case parse_bare_reference(rest, sheet, sheet_prefix) do
-      {:ok, _, _} = ok ->
-        ok
-
-      :error ->
-        :error
     end
   end
 

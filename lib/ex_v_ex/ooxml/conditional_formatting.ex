@@ -20,6 +20,12 @@ defmodule ExVEx.OOXML.ConditionalFormatting do
     {"conditionalFormatting", new_attrs, new_children}
   end
 
+  @doc "Rewrites only the `<formula>` children, leaving `sqref` untouched."
+  @spec shift_formulas(node_tuple(), MutShift.t(), String.t()) :: node_tuple()
+  def shift_formulas({"conditionalFormatting", attrs, children}, %MutShift{} = shift, sheet_name) do
+    {"conditionalFormatting", attrs, Enum.map(children, &shift_child(&1, shift, sheet_name))}
+  end
+
   defp shift_sqref_attr({"sqref", value}, shift), do: {"sqref", SqrefShift.shift(value, shift)}
   defp shift_sqref_attr(other, _shift), do: other
 

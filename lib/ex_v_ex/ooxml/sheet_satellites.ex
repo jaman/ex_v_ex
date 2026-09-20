@@ -1,7 +1,8 @@
 defmodule ExVEx.OOXML.SheetSatellites do
   @moduledoc """
   Cascades a `%ExVEx.Mutation.Shift{}` into the satellite parts linked
-  from a worksheet's `.rels` file — comments, tables, and drawings.
+  from a worksheet's `.rels` file — comments and drawings. Table parts
+  are handled by `ExVEx.Workbook.Tables`.
 
   Each satellite part is a standalone XML document in the OOXML package.
   This module locates those parts via the worksheet's relationships, runs
@@ -10,18 +11,17 @@ defmodule ExVEx.OOXML.SheetSatellites do
   """
 
   alias ExVEx.Mutation.Shift, as: MutShift
-  alias ExVEx.OOXML.{Comments, Drawing, Table}
+  alias ExVEx.OOXML.{Comments, Drawing}
   alias ExVEx.Packaging.Relationships
   alias ExVEx.Packaging.Relationships.Relationship
   alias ExVEx.Workbook
 
   @comments_rel "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
-  @table_rel "http://schemas.openxmlformats.org/officeDocument/2006/relationships/table"
   @drawing_rel "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
 
   @spec shift(Workbook.t(), String.t(), MutShift.t()) :: Workbook.t()
   def shift(%Workbook{} = book, sheet_path, %MutShift{} = mut_shift) do
-    rels_path = rels_path_for(sheet_path)
+    rels_path = Relationships.rels_path_for(sheet_path)
 
     case Map.fetch(book.parts, rels_path) do
       {:ok, xml} ->
@@ -47,10 +47,6 @@ defmodule ExVEx.OOXML.SheetSatellites do
     apply_shift(book, Relationships.resolve(rel, rels_path), &Comments.shift_xml(&1, shift))
   end
 
-  defp shift_one(book, %Relationship{type: @table_rel} = rel, rels_path, shift) do
-    apply_shift(book, Relationships.resolve(rel, rels_path), &Table.shift_xml(&1, shift))
-  end
-
   defp shift_one(book, %Relationship{type: @drawing_rel} = rel, rels_path, shift) do
     apply_shift(book, Relationships.resolve(rel, rels_path), &Drawing.shift_xml(&1, shift))
   end
@@ -63,16 +59,6 @@ defmodule ExVEx.OOXML.SheetSatellites do
       %{book | parts: Map.put(parts, part_path, new_xml)}
     else
       _ -> book
-    end
-  end
-
-  defp rels_path_for(part_path) do
-    dir = Path.dirname(part_path)
-    base = Path.basename(part_path)
-
-    case dir do
-      "." -> "_rels/#{base}.rels"
-      _ -> "#{dir}/_rels/#{base}.rels"
     end
   end
 end

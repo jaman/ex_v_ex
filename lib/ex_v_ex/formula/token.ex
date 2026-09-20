@@ -14,11 +14,23 @@ defmodule ExVEx.Formula.Token do
     * `:row_range` — full-row reference like `1:5`.
     * `:col_range` — full-column reference like `A:C`.
     * `:sheet_range` — 3D sheet-span prefix (`Sheet1:Sheet3!`).
+    * `:structured_ref` — a table reference such as `Table1[Amount]` or
+      `[@Price]`. `table` is the table name (`nil` for the implicit
+      form) and `body` is the text between the outermost brackets.
+      Structural shifts never rewrite these; only column and table
+      renames do.
   """
 
   alias ExVEx.Formula.Reference
 
-  @type kind :: :literal | :cell_ref | :range_ref | :row_range | :col_range | :sheet_range
+  @type kind ::
+          :literal
+          | :cell_ref
+          | :range_ref
+          | :row_range
+          | :col_range
+          | :sheet_range
+          | :structured_ref
 
   @type t ::
           %__MODULE__{kind: :literal, text: String.t()}
@@ -53,6 +65,12 @@ defmodule ExVEx.Formula.Token do
               end_abs?: boolean(),
               text: String.t()
             }
+          | %__MODULE__{
+              kind: :structured_ref,
+              table: String.t() | nil,
+              body: String.t(),
+              text: String.t() | nil
+            }
 
   defstruct [
     :kind,
@@ -66,6 +84,8 @@ defmodule ExVEx.Formula.Token do
     :start_col,
     :end_col,
     :start_abs?,
-    :end_abs?
+    :end_abs?,
+    :table,
+    :body
   ]
 end
