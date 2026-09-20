@@ -245,8 +245,8 @@ defmodule Mix.Tasks.Bench.Comparative do
     {json_line, time_output} = split_time_output(out)
 
     result =
-      case :json.decode(json_line) do
-        decoded when is_map(decoded) ->
+      case JSON.decode(json_line) do
+        {:ok, decoded} when is_map(decoded) ->
           decoded
 
         _ ->
@@ -305,7 +305,7 @@ defmodule Mix.Tasks.Bench.Comparative do
 
   defp write_results(results, run_dir) do
     path = Path.join(run_dir, "results.json")
-    File.write!(path, :json.encode(results))
+    File.write!(path, JSON.encode!(results))
   end
 
   defp generate_report(results, run_dir, _langs) do

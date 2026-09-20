@@ -73,7 +73,7 @@ defmodule ExVEx.Bench.Report do
         &Map.take(&1, ~w(phase lang reads mode wall_ms rss_kb cells_written cells_cleared))
       )
 
-    json = :json.encode(payload)
+    json = JSON.encode!(payload)
 
     """
     <!DOCTYPE html>
