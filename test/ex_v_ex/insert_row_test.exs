@@ -39,6 +39,38 @@ defmodule ExVEx.InsertRowTest do
     end
   end
 
+  describe "insert_row/4 — other sheets" do
+    test "cells on other sheets stay where they are", %{out: out} do
+      {:ok, book} = ExVEx.new()
+      {:ok, book} = ExVEx.add_sheet(book, "Other")
+      {:ok, book} = ExVEx.put_cell(book, "Other", "A5", "keep")
+      {:ok, book} = ExVEx.merge_cells(book, "Other", "B5:C6")
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "A5", "move")
+
+      {:ok, book} = ExVEx.insert_row(book, "Sheet1", 2)
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert ExVEx.get_cell(reopened, "Other", "A5") == {:ok, "keep"}
+      assert ExVEx.merged_ranges(reopened, "Other") == {:ok, ["B5:C6"]}
+      assert ExVEx.get_cell(reopened, "Sheet1", "A6") == {:ok, "move"}
+    end
+
+    test "formulas on other sheets that point at the shifted sheet update", %{out: out} do
+      {:ok, book} = ExVEx.new()
+      {:ok, book} = ExVEx.add_sheet(book, "Other")
+      {:ok, book} = ExVEx.put_cell(book, "Other", "A1", {:formula, "=Sheet1!A5+A5"})
+
+      {:ok, book} = ExVEx.insert_row(book, "Sheet1", 2)
+
+      :ok = ExVEx.save(book, out)
+      {:ok, reopened} = ExVEx.open(out)
+
+      assert ExVEx.get_formula(reopened, "Other", "A1") == {:ok, "=Sheet1!A6+A5"}
+    end
+  end
+
   describe "insert_row/4 — formula rewriting" do
     test "formulas referencing shifted cells update", %{out: out} do
       {:ok, book} = ExVEx.new()

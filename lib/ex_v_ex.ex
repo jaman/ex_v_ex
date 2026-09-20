@@ -17,6 +17,7 @@ defmodule ExVEx do
   without the caller needing to opt in.
   """
 
+  alias ExVEx.CellCodec
   alias ExVEx.Formula.Serializer, as: FormulaSerializer
   alias ExVEx.Formula.Shift, as: FormulaShift
   alias ExVEx.Formula.Tokenizer
@@ -507,7 +508,7 @@ defmodule ExVEx do
          {:ok, path} <- sheet_path_or_error(book, sheet),
          {:ok, editable, _book} <- Workbook.fetch_sheet_tree(book, path) do
       case Editable.cell_record_at(editable, coord) do
-        {:ok, cell} -> resolve_cell_value(cell, book)
+        {:ok, cell} -> CellCodec.decode(cell, book)
         :error -> {:ok, nil}
       end
     end
@@ -519,44 +520,11 @@ defmodule ExVEx do
     with {:ok, coord} <- parse_coordinate(ref),
          {:ok, path} <- sheet_path_or_error(book, sheet),
          {:ok, editable, book} <- Workbook.fetch_sheet_tree(book, path) do
-      {encoded, book} = prepare_cell_value(book, value)
+      {encoded, book} = CellCodec.encode(book, value)
       new_editable = Editable.put_cell(editable, coord, encoded)
       {:ok, Workbook.put_sheet_tree(book, path, new_editable)}
     end
   end
-
-  defp prepare_cell_value(%Workbook{shared_strings: %SharedStrings{}} = book, value)
-       when is_binary(value) do
-    {index, sst} = SharedStrings.intern(book.shared_strings, value)
-    {{:shared_string, index}, %{book | shared_strings: sst, shared_strings_dirty: true}}
-  end
-
-  defp prepare_cell_value(book, %Date{} = date) do
-    prepare_styled_serial(book, Date.to_gregorian_days(date) - gregorian_epoch(), 14)
-  end
-
-  defp prepare_cell_value(book, %NaiveDateTime{} = dt) do
-    days = Date.to_gregorian_days(NaiveDateTime.to_date(dt)) - gregorian_epoch()
-    {hours, minutes, seconds} = {dt.hour, dt.minute, dt.second}
-    fraction = (hours * 3600 + minutes * 60 + seconds) / 86_400
-    prepare_styled_serial(book, days + fraction, 22)
-  end
-
-  defp prepare_cell_value(book, value), do: {value, book}
-
-  defp prepare_styled_serial(book, serial, num_fmt_id) do
-    styles = book.styles || %Styles{}
-    {style_id, styles} = Styles.upsert_date_format(styles, num_fmt_id)
-
-    book = %{book | styles: styles, styles_dirty: true, styles_path: styles_path(book)}
-
-    {{:styled, serial, style_id}, book}
-  end
-
-  defp styles_path(%Workbook{styles_path: path}) when is_binary(path), do: path
-  defp styles_path(_), do: "xl/styles.xml"
-
-  defp gregorian_epoch, do: Date.to_gregorian_days(~D[1899-12-30])
 
   @spec get_style(Workbook.t(), sheet_name(), cell_ref()) ::
           {:ok, ExVEx.Style.t()} | {:error, term()}
@@ -753,14 +721,19 @@ defmodule ExVEx do
     Enum.reduce(book.workbook.sheets, book, &shift_one_sheet(&1, &2, shift))
   end
 
-  defp shift_one_sheet(sheet_ref, acc, shift) do
+  defp shift_one_sheet(sheet_ref, acc, %MutShift{sheet: target} = shift) do
     with {:ok, path} <- sheet_path(acc, sheet_ref.name),
          {:ok, editable, acc_after_fetch} <- Workbook.fetch_sheet_tree(acc, path) do
-      new_editable = Editable.shift(editable, shift, sheet_ref.name)
+      if sheet_ref.name == target do
+        new_editable = Editable.shift(editable, shift, sheet_ref.name)
 
-      acc_after_fetch
-      |> Workbook.put_sheet_tree(path, new_editable)
-      |> SheetSatellites.shift(path, shift)
+        acc_after_fetch
+        |> Workbook.put_sheet_tree(path, new_editable)
+        |> SheetSatellites.shift(path, shift)
+      else
+        new_editable = Editable.shift_formulas(editable, shift, sheet_ref.name)
+        Workbook.put_sheet_tree(acc_after_fetch, path, new_editable)
+      end
     else
       _ -> acc
     end
@@ -926,7 +899,7 @@ defmodule ExVEx do
   end
 
   defp put_resolved({coord, cell}, acc, book) do
-    case resolve_cell_value(cell, book) do
+    case CellCodec.decode(cell, book) do
       {:ok, value} -> Map.put(acc, Coordinate.to_string(coord), value)
       {:error, _} -> acc
     end
@@ -954,7 +927,7 @@ defmodule ExVEx do
   end
 
   defp resolve_to_pair({coord, cell}, book) do
-    case resolve_cell_value(cell, book) do
+    case CellCodec.decode(cell, book) do
       {:ok, value} -> [{Coordinate.to_string(coord), value}]
       {:error, _} -> []
     end
@@ -980,103 +953,6 @@ defmodule ExVEx do
   end
 
   defp parse_coordinate(_), do: {:error, :invalid_coordinate}
-
-  defp resolve_cell_value(%{raw_type: :shared_string, raw_value: idx_str}, %Workbook{
-         shared_strings: %SharedStrings{} = sst
-       }) do
-    with {idx, ""} <- Integer.parse(idx_str || ""),
-         {:ok, text} <- SharedStrings.get(sst, idx) do
-      {:ok, text}
-    else
-      _ -> {:error, :invalid_shared_string_index}
-    end
-  end
-
-  defp resolve_cell_value(%{raw_type: :shared_string}, _), do: {:error, :no_shared_string_table}
-
-  defp resolve_cell_value(%{raw_type: :inline_string, raw_value: text}, _), do: {:ok, text || ""}
-  defp resolve_cell_value(%{raw_type: :boolean, raw_value: "1"}, _), do: {:ok, true}
-  defp resolve_cell_value(%{raw_type: :boolean, raw_value: "0"}, _), do: {:ok, false}
-
-  defp resolve_cell_value(%{raw_type: :number} = cell, %Workbook{} = book) do
-    case parse_number(cell.raw_value) do
-      {:ok, number} when is_number(number) -> maybe_as_date(number, cell, book)
-      other -> other
-    end
-  end
-
-  defp resolve_cell_value(%{raw_type: :formula_string, raw_value: text}, _), do: {:ok, text || ""}
-
-  defp resolve_cell_value(%{raw_type: :error, raw_value: code}, _) do
-    {:error, {:cell_error, code}}
-  end
-
-  defp maybe_as_date(number, %{style_id: nil}, _), do: {:ok, number}
-  defp maybe_as_date(number, _cell, %Workbook{styles: nil}), do: {:ok, number}
-
-  defp maybe_as_date(number, %{style_id: style_id}, %Workbook{styles: styles}) do
-    with {:ok, xf} <- Styles.cell_format(styles, style_id),
-         true <- Styles.date_format?(styles, xf),
-         {:ok, value} <- serial_to_temporal(number, date_format_code(styles, xf)) do
-      {:ok, value}
-    else
-      _ -> {:ok, number}
-    end
-  end
-
-  defp date_format_code(%Styles{} = styles, %{num_fmt_id: id}), do: Styles.format_code(styles, id)
-
-  defp serial_to_temporal(number, format_code) do
-    if time_bearing_code?(format_code) do
-      serial_to_naive_datetime(number)
-    else
-      serial_to_date(number)
-    end
-  end
-
-  defp time_bearing_code?(code), do: Regex.match?(~r/[hHsS]/, code)
-
-  defp serial_to_date(serial) when is_number(serial) and serial >= 1 do
-    days = trunc(serial)
-    epoch = if days < 60, do: ~D[1899-12-31], else: ~D[1899-12-30]
-    {:ok, Date.add(epoch, days)}
-  end
-
-  defp serial_to_date(_), do: {:error, :serial_out_of_range}
-
-  defp serial_to_naive_datetime(serial) when is_number(serial) and serial >= 0 do
-    days = trunc(serial)
-    fraction = serial - days
-    seconds_in_day = round(fraction * 86_400)
-
-    date =
-      if days == 0 do
-        ~D[1899-12-30]
-      else
-        epoch = if days < 60, do: ~D[1899-12-31], else: ~D[1899-12-30]
-        Date.add(epoch, days)
-      end
-
-    {:ok, NaiveDateTime.add(NaiveDateTime.new!(date, ~T[00:00:00]), seconds_in_day, :second)}
-  end
-
-  defp serial_to_naive_datetime(_), do: {:error, :serial_out_of_range}
-
-  defp parse_number(nil), do: {:ok, nil}
-
-  defp parse_number(raw) do
-    if String.contains?(raw, [".", "e", "E"]) do
-      case Float.parse(raw) do
-        {f, ""} -> {:ok, f}
-        _ -> {:error, {:bad_number, raw}}
-      end
-    else
-      case Integer.parse(raw) do
-        {n, ""} -> {:ok, n}
-        _ -> {:error, {:bad_number, raw}}
-      end
-    end
-  end
 
   defp entries_to_parts(entries) do
     Map.new(entries, fn %{path: p, data: data} -> {p, data} end)
