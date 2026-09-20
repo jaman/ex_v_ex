@@ -30,6 +30,7 @@ defmodule ExVEx do
   alias ExVEx.OOXML.Worksheet.Editable
   alias ExVEx.Packaging.{ContentTypes, Relationships, Zip}
   alias ExVEx.Style.{Border, Builder, Fill, Font}
+  alias ExVEx.Tables
   alias ExVEx.Utils.{Coordinate, Range}
   alias ExVEx.Workbook
 
@@ -492,14 +493,7 @@ defmodule ExVEx do
   end
 
   @spec sheet_path(Workbook.t(), sheet_name()) :: {:ok, String.t()} | :error
-  def sheet_path(%Workbook{} = book, name) do
-    with %{} = ref <- Enum.find(book.workbook.sheets, &(&1.name == name)),
-         {:ok, rel} <- Relationships.get(book.workbook_rels, ref.rel_id) do
-      {:ok, Relationships.resolve(rel, Relationships.rels_path_for(book.workbook_path))}
-    else
-      _ -> :error
-    end
-  end
+  defdelegate sheet_path(book, name), to: Workbook
 
   @spec get_cell(Workbook.t(), sheet_name(), cell_ref()) ::
           {:ok, cell_value() | Date.t() | NaiveDateTime.t()} | {:error, term()}
@@ -724,18 +718,25 @@ defmodule ExVEx do
   defp shift_one_sheet(sheet_ref, acc, %MutShift{sheet: target} = shift) do
     with {:ok, path} <- sheet_path(acc, sheet_ref.name),
          {:ok, editable, acc_after_fetch} <- Workbook.fetch_sheet_tree(acc, path) do
-      if sheet_ref.name == target do
-        new_editable = Editable.shift(editable, shift, sheet_ref.name)
-
-        acc_after_fetch
-        |> Workbook.put_sheet_tree(path, new_editable)
-        |> SheetSatellites.shift(path, shift)
-      else
-        new_editable = Editable.shift_formulas(editable, shift, sheet_ref.name)
-        Workbook.put_sheet_tree(acc_after_fetch, path, new_editable)
-      end
+      if sheet_ref.name == target,
+        do: shift_target_sheet(acc_after_fetch, path, editable, sheet_ref.name, shift),
+        else: shift_other_sheet(acc_after_fetch, path, editable, sheet_ref.name, shift)
     else
       _ -> acc
+    end
+  end
+
+  defp shift_target_sheet(book, path, editable, sheet_name, shift) do
+    book
+    |> Workbook.put_sheet_tree(path, Editable.shift(editable, shift, sheet_name))
+    |> SheetSatellites.shift(path, shift)
+    |> Tables.shift(sheet_name, path, shift)
+  end
+
+  defp shift_other_sheet(book, path, editable, sheet_name, shift) do
+    case Editable.shift_formulas(editable, shift, sheet_name) do
+      {_unchanged, false} -> book
+      {new_editable, true} -> Workbook.put_sheet_tree(book, path, new_editable)
     end
   end
 
@@ -871,6 +872,127 @@ defmodule ExVEx do
 
   defp handle_missing_unmerge(book, :ignore), do: {:ok, book}
   defp handle_missing_unmerge(_book, :error), do: {:error, :not_merged}
+
+  @doc """
+  Creates an Excel table over `ref` on `sheet`.
+
+  The first row of `ref` is the header row; its cells supply the column
+  names (empty cells receive `ColumnN`, non-text cells are converted to
+  text). Tables need at least one data row below the header.
+
+  ## Options
+
+    * `:name` — the table name (default `TableN`). Letters, digits, `_`
+      and `.`; no spaces; must not look like a cell reference; unique
+      across tables and defined names (case-insensitive).
+    * `:columns` — explicit column names, one per column; written into
+      the header cells.
+    * `:style` — a table style name such as `"TableStyleMedium2"` (the
+      default) or `nil` for no style.
+    * `:show_row_stripes` (default `true`), `:show_column_stripes`,
+      `:show_first_column`, `:show_last_column` (default `false`).
+    * `:header_row` — `false` to create a table without a header row.
+
+  Errors: `:unknown_sheet`, `:invalid_range`, `:range_too_small`,
+  `{:invalid_table_name, name}`, `{:duplicate_table_name, name}`,
+  `{:overlaps_table, name}`, `{:overlaps_merged_range, ref}`,
+  `:column_count_mismatch`, `{:duplicate_column_name, name}`.
+  """
+  @spec add_table(Workbook.t(), sheet_name(), range_ref(), keyword()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  def add_table(%Workbook{} = book, sheet, ref, opts \\ []) when is_list(opts) do
+    Tables.create(book, sheet, ref, opts)
+  end
+
+  @doc "Lists every table in the workbook as `%ExVEx.Table{}` structs."
+  @spec tables(Workbook.t()) :: [ExVEx.Table.t()]
+  defdelegate tables(book), to: Tables, as: :list
+
+  @doc "Lists the tables on one sheet."
+  @spec tables(Workbook.t(), sheet_name()) :: {:ok, [ExVEx.Table.t()]} | {:error, :unknown_sheet}
+  defdelegate tables(book, sheet), to: Tables, as: :list
+
+  @doc "Looks up a table by name (case-insensitive)."
+  @spec table(Workbook.t(), String.t()) :: {:ok, ExVEx.Table.t()} | {:error, :unknown_table}
+  defdelegate table(book, name), to: Tables, as: :fetch
+
+  @doc """
+  Removes a table, leaving its cells in place. Structured references to
+  the table anywhere in the workbook are rewritten as plain ranges.
+  """
+  @spec remove_table(Workbook.t(), String.t()) :: {:ok, Workbook.t()} | {:error, term()}
+  defdelegate remove_table(book, name), to: Tables, as: :remove
+
+  @doc "Renames a table and every formula that refers to it by name."
+  @spec rename_table(Workbook.t(), String.t(), String.t()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  defdelegate rename_table(book, old, new), to: Tables, as: :rename
+
+  @doc """
+  Renames a table column: the header cell, the table part, and every
+  structured reference to the column (including `[@Column]` references
+  inside the table) are updated.
+  """
+  @spec rename_table_column(Workbook.t(), String.t(), String.t(), String.t()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  defdelegate rename_table_column(book, name, old, new), to: Tables, as: :rename_column
+
+  @doc """
+  Changes a table's range. The header row must stay on the same row.
+  Added columns take their names from the header cells; removed columns
+  are dropped from the table; a totals row moves to the new last row.
+  """
+  @spec resize_table(Workbook.t(), String.t(), range_ref()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  defdelegate resize_table(book, name, ref), to: Tables, as: :resize
+
+  @doc """
+  Sets the table style. Options: `:style` (a style name or `nil`),
+  `:show_row_stripes`, `:show_column_stripes`, `:show_first_column`,
+  `:show_last_column`.
+  """
+  @spec put_table_style(Workbook.t(), String.t(), keyword()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  defdelegate put_table_style(book, name, opts), to: Tables, as: :put_style
+
+  @doc """
+  Shows the totals row (adding it below the data when absent) and sets
+  the total for each named column. `functions` maps column names to
+  `:sum`, `:average`, `:count`, `:count_nums`, `:max`, `:min`,
+  `:std_dev`, `:var`, `:none`, `{:custom, formula}`, or
+  `{:label, text}`. The totals cells receive matching `SUBTOTAL`
+  formulas, custom formulas, or label text.
+
+      ExVEx.put_table_totals_row(book, "Sales", Region: {:label, "Total"}, Amount: :sum)
+  """
+  @spec put_table_totals_row(Workbook.t(), String.t(), keyword() | map()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  defdelegate put_table_totals_row(book, name, functions), to: Tables.Rows, as: :put_totals
+
+  @doc "Hides the totals row, clearing its cells and shrinking the table."
+  @spec remove_table_totals_row(Workbook.t(), String.t()) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  defdelegate remove_table_totals_row(book, name), to: Tables.Rows, as: :remove_totals
+
+  @doc "Returns the data rows of a table as lists of values (header and totals excluded)."
+  @spec table_rows(Workbook.t(), String.t()) :: {:ok, [[term()]]} | {:error, term()}
+  defdelegate table_rows(book, name), to: Tables.Rows, as: :rows
+
+  @doc "Returns the data rows of a table as maps keyed by column name."
+  @spec table_records(Workbook.t(), String.t()) ::
+          {:ok, [%{String.t() => term()}]} | {:error, term()}
+  defdelegate table_records(book, name), to: Tables.Rows, as: :records
+
+  @doc """
+  Appends rows below the table's data, growing the table. Each row is a
+  list of values in column order or a map keyed by column name (missing
+  keys stay empty). The target cells must be empty; a totals row is
+  moved down. Columns with a calculated-column formula receive it where
+  no value is given.
+  """
+  @spec append_table_rows(Workbook.t(), String.t(), [[term()] | map()]) ::
+          {:ok, Workbook.t()} | {:error, term()}
+  defdelegate append_table_rows(book, name, rows), to: Tables.Rows, as: :append
 
   @spec get_formula(Workbook.t(), sheet_name(), cell_ref()) ::
           {:ok, String.t() | nil} | {:error, term()}

@@ -61,6 +61,17 @@ defmodule ExVEx.Workbook do
           source_path: Path.t() | nil
         }
 
+  @doc "Resolves a sheet name to its worksheet part path."
+  @spec sheet_path(t(), String.t()) :: {:ok, String.t()} | :error
+  def sheet_path(%__MODULE__{} = book, name) do
+    with %{} = ref <- Enum.find(book.workbook.sheets, &(&1.name == name)),
+         {:ok, rel} <- Relationships.get(book.workbook_rels, ref.rel_id) do
+      {:ok, Relationships.resolve(rel, Relationships.rels_path_for(book.workbook_path))}
+    else
+      _ -> :error
+    end
+  end
+
   @doc """
   Returns the parsed worksheet tree for `path`, parsing and caching it on
   first access. Subsequent calls reuse the cached tree so bulk reads and

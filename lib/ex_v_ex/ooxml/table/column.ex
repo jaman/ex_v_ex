@@ -94,6 +94,7 @@ defmodule ExVEx.OOXML.Table.Column do
   @spec put_totals(t(), totals_function() | {:custom, String.t()} | {:label, String.t()} | nil) ::
           t()
   def put_totals(%__MODULE__{} = column, nil), do: clear_totals(column)
+  def put_totals(%__MODULE__{} = column, :none), do: clear_totals(column)
 
   def put_totals(%__MODULE__{} = column, {:label, text}) when is_binary(text) do
     %{clear_totals(column) | attrs: put_attr(column.attrs, "totalsRowLabel", text)}

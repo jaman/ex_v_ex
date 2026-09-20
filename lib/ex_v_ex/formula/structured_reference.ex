@@ -15,6 +15,7 @@ defmodule ExVEx.Formula.StructuredReference do
   """
 
   alias ExVEx.Formula.Token
+  alias ExVEx.Utils.Coordinate
 
   @type item ::
           {:text, String.t()}
@@ -50,6 +51,96 @@ defmodule ExVEx.Formula.StructuredReference do
   def column_names(%Token{kind: :structured_ref, body: body}) do
     body |> parse_body() |> collect_columns([]) |> Enum.reverse()
   end
+
+  @doc """
+  Converts a structured reference token into the A1 range it denotes on
+  `table`, or returns the token unchanged when it cannot be resolved.
+
+  `sheet_prefix` is prepended to the range (pass `""` when the formula is
+  on the table's own sheet). `formula_row` is the row of the cell holding
+  the formula, used for `@` / `#This Row` references.
+  """
+  @spec to_range(Token.t(), map(), String.t(), pos_integer() | nil) :: Token.t()
+  def to_range(
+        %Token{kind: :structured_ref, body: body} = token,
+        table,
+        sheet_prefix,
+        formula_row
+      ) do
+    items = parse_body(body)
+    columns = items |> collect_columns([]) |> Enum.reverse()
+    specials = collect_specials(items)
+
+    with {:ok, {first_row, last_row}} <- row_span(specials, table, formula_row),
+         {:ok, {first_col, last_col}} <- column_span(columns, table) do
+      text = sheet_prefix <> range_text(first_row, first_col, last_row, last_col)
+      %Token{kind: :literal, text: text}
+    else
+      :error -> token
+    end
+  end
+
+  def to_range(token, _table, _sheet_prefix, _formula_row), do: token
+
+  defp collect_specials(items) do
+    Enum.flat_map(items, fn
+      {:text, "@"} -> ["#this row"]
+      {:text, "#" <> _ = special} -> [String.downcase(special)]
+      {:group, inner} -> collect_specials(inner)
+      _ -> []
+    end)
+  end
+
+  defp row_span([], table, _formula_row), do: rows_or_error(table.data_rows)
+
+  defp row_span(specials, table, formula_row) do
+    spans = Enum.map(specials, &special_rows(&1, table, formula_row))
+
+    if Enum.any?(spans, &(&1 == :error)) or spans == [] do
+      :error
+    else
+      {:ok,
+       {spans |> Enum.map(&elem(&1, 0)) |> Enum.min(),
+        spans |> Enum.map(&elem(&1, 1)) |> Enum.max()}}
+    end
+  end
+
+  defp rows_or_error(nil), do: :error
+  defp rows_or_error(span), do: {:ok, span}
+
+  defp special_rows("#all", table, _), do: {table.top, table.bottom}
+  defp special_rows("#data", table, _), do: table.data_rows || :error
+
+  defp special_rows("#headers", table, _),
+    do: if(table.header_row, do: {table.header_row, table.header_row}, else: :error)
+
+  defp special_rows("#totals", table, _),
+    do: if(table.totals_row, do: {table.totals_row, table.totals_row}, else: :error)
+
+  defp special_rows("#this row", _table, row) when is_integer(row), do: {row, row}
+  defp special_rows(_, _, _), do: :error
+
+  defp column_span([], table), do: {:ok, {table.left, table.right}}
+
+  defp column_span(names, table) do
+    indexes = Enum.map(names, &column_offset(table, &1))
+
+    if Enum.any?(indexes, &is_nil/1) do
+      :error
+    else
+      {:ok, {table.left + Enum.min(indexes), table.left + Enum.max(indexes)}}
+    end
+  end
+
+  defp column_offset(table, name) do
+    wanted = String.downcase(name)
+    Enum.find_index(table.columns, &(String.downcase(&1) == wanted))
+  end
+
+  defp range_text(row, col, row, col), do: cell_text(row, col)
+  defp range_text(r1, c1, r2, c2), do: cell_text(r1, c1) <> ":" <> cell_text(r2, c2)
+
+  defp cell_text(row, col), do: Coordinate.to_string({row, col})
 
   defp rename_column_in_token(%Token{kind: :structured_ref} = token, table, old, new, inside?) do
     if targets_table?(token.table, table, inside?) do
