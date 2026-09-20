@@ -16,7 +16,7 @@ defmodule ExVEx.Formula.Serializer do
   # (see `ExVEx.Formula.Shift`) to signal "rebuild from structured fields."
   defp emit(%Token{text: text}) when is_binary(text), do: text
 
-  defp emit(%Token{kind: :literal, text: nil} = t), do: t.text || ""
+  defp emit(%Token{kind: :literal, text: nil}), do: ""
 
   defp emit(%Token{kind: :structured_ref, table: table, body: body}) do
     (table || "") <> "[" <> body <> "]"
