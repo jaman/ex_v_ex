@@ -18,22 +18,25 @@ defmodule ExVEx.Formula.Reference do
           col_abs?: boolean()
         }
 
+  @max_row 1_048_576
+  @max_col 16_384
+
   @spec parse(String.t()) :: {:ok, t()} | :error
   def parse(ref) when is_binary(ref) do
     case Regex.run(~r/^(\$?)([A-Za-z]+)(\$?)([1-9][0-9]*)$/, ref) do
       [_, col_abs, letters, row_abs, digits] ->
-        {:ok,
-         %__MODULE__{
-           row: String.to_integer(digits),
-           col: column_number(letters),
-           row_abs?: row_abs == "$",
-           col_abs?: col_abs == "$"
-         }}
+        build(String.to_integer(digits), column_number(letters), row_abs == "$", col_abs == "$")
 
       _ ->
         :error
     end
   end
+
+  defp build(row, col, row_abs?, col_abs?) when row <= @max_row and col <= @max_col do
+    {:ok, %__MODULE__{row: row, col: col, row_abs?: row_abs?, col_abs?: col_abs?}}
+  end
+
+  defp build(_row, _col, _row_abs?, _col_abs?), do: :error
 
   @spec to_string(t()) :: String.t()
   def to_string(%__MODULE__{} = r) do

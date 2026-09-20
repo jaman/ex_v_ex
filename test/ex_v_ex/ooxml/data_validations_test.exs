@@ -19,8 +19,7 @@ defmodule ExVEx.OOXML.DataValidationsTest do
 
     {"dataValidations", _,
      [
-       {"dataValidation", attrs,
-        [{"formula1", _, [f1]}, {"formula2", _, [f2]}]}
+       {"dataValidation", attrs, [{"formula1", _, [f1]}, {"formula2", _, [f2]}]}
      ]} = DataValidations.shift_node(node, shift, "Sheet1")
 
     assert {_, "A7:A22"} = List.keyfind(attrs, "sqref", 0)

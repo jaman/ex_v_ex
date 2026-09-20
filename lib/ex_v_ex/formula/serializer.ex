@@ -18,6 +18,10 @@ defmodule ExVEx.Formula.Serializer do
 
   defp emit(%Token{kind: :literal, text: nil} = t), do: t.text || ""
 
+  defp emit(%Token{kind: :structured_ref, table: table, body: body}) do
+    (table || "") <> "[" <> body <> "]"
+  end
+
   defp emit(%Token{kind: :cell_ref, sheet: sheet, ref: ref}) do
     sheet_prefix(sheet) <> Reference.to_string(ref)
   end
