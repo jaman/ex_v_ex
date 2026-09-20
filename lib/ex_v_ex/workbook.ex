@@ -177,7 +177,7 @@ defmodule ExVEx.Workbook do
       Enum.reject(rels.entries, &String.ends_with?(&1.target, "calcChain.xml"))
 
     new_rels = %{rels | entries: new_entries}
-    rels_path = rels_path_for(book.workbook_path)
+    rels_path = Relationships.rels_path_for(book.workbook_path)
 
     %{
       book
@@ -196,16 +196,6 @@ defmodule ExVEx.Workbook do
 
       :error ->
         book
-    end
-  end
-
-  defp rels_path_for(part_path) do
-    dir = Path.dirname(part_path)
-    base = Path.basename(part_path)
-
-    case dir do
-      "." -> "_rels/#{base}.rels"
-      _ -> "#{dir}/_rels/#{base}.rels"
     end
   end
 

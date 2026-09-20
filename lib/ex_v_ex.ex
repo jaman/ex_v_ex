@@ -95,7 +95,7 @@ defmodule ExVEx do
          {:ok, workbook_path} <- resolve_workbook_path(package_rels),
          {:ok, workbook_xml} <- fetch_part(parts, workbook_path),
          {:ok, workbook} <- WorkbookXml.parse(workbook_xml),
-         workbook_rels_path = rels_path_for(workbook_path),
+         workbook_rels_path = Relationships.rels_path_for(workbook_path),
          {:ok, workbook_rels_xml} <- fetch_part(parts, workbook_rels_path),
          {:ok, workbook_rels} <- Relationships.parse(workbook_rels_xml),
          sst_path = resolve_rel_target(workbook_rels, @shared_strings_type, workbook_path),
@@ -476,7 +476,7 @@ defmodule ExVEx do
       WorkbookXml.serialize_into(book.workbook, Map.fetch!(book.parts, book.workbook_path))
 
     rels_xml = Relationships.serialize(book.workbook_rels)
-    rels_path = rels_path_for(book.workbook_path)
+    rels_path = Relationships.rels_path_for(book.workbook_path)
 
     ct_xml = ContentTypes.serialize(book.content_types)
 
@@ -494,7 +494,7 @@ defmodule ExVEx do
   def sheet_path(%Workbook{} = book, name) do
     with %{} = ref <- Enum.find(book.workbook.sheets, &(&1.name == name)),
          {:ok, rel} <- Relationships.get(book.workbook_rels, ref.rel_id) do
-      {:ok, Relationships.resolve(rel, rels_path_for(book.workbook_path))}
+      {:ok, Relationships.resolve(rel, Relationships.rels_path_for(book.workbook_path))}
     else
       _ -> :error
     end
@@ -1099,7 +1099,7 @@ defmodule ExVEx do
   defp resolve_rel_target(%Relationships{entries: entries}, type, workbook_path) do
     case Enum.find(entries, &(&1.type == type)) do
       nil -> nil
-      rel -> Relationships.resolve(rel, rels_path_for(workbook_path))
+      rel -> Relationships.resolve(rel, Relationships.rels_path_for(workbook_path))
     end
   end
 
@@ -1109,16 +1109,6 @@ defmodule ExVEx do
     case Map.fetch(parts, path) do
       {:ok, xml} -> parser.(xml)
       :error -> {:ok, nil}
-    end
-  end
-
-  defp rels_path_for(part_path) do
-    dir = Path.dirname(part_path)
-    base = Path.basename(part_path)
-
-    case dir do
-      "." -> "_rels/#{base}.rels"
-      _ -> "#{dir}/_rels/#{base}.rels"
     end
   end
 end
