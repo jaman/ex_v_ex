@@ -6,6 +6,60 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Excel tables
+
+- `ExVEx.add_table/4` creates a table over a range: the header cells
+  supply the column names (or pass `:columns`), with `:name`, `:style`,
+  banding flags, and `:header_row` options. Validates the name, the
+  minimum size, and overlap with other tables and merged ranges.
+- `ExVEx.tables/1`, `ExVEx.tables/2`, `ExVEx.table/2` return
+  `%ExVEx.Table{}` structs with the header, data, and totals ranges,
+  column names, and style.
+- `ExVEx.remove_table/2` deletes the table part, relationship, worksheet
+  link, and content type; structured references to the table anywhere in
+  the workbook become plain ranges.
+- `ExVEx.rename_table/3` and `ExVEx.rename_table_column/4` update the
+  part, the header cell, and every formula that names the table or
+  column (cell formulas, conditional formatting, data validations,
+  defined names, calculated-column and totals-row formulas).
+- `ExVEx.resize_table/3`, `ExVEx.put_table_style/3`.
+- `ExVEx.put_table_totals_row/3` and `ExVEx.remove_table_totals_row/2`
+  manage the totals row, writing `SUBTOTAL` formulas, custom formulas,
+  or labels into its cells.
+- `ExVEx.table_rows/2`, `ExVEx.table_records/2`, and
+  `ExVEx.append_table_rows/3` read and extend the data body; appended
+  rows fill calculated columns and move the totals row down.
+- Row/column shifts now keep table parts consistent: tables grow,
+  shrink, move, or are removed; inserted columns get placeholder header
+  cells; a shift that removes every data row leaves a header and one
+  blank row.
+- `ExVEx.Formula.Tokenizer` emits structured references
+  (`Table1[Amount]`, `[@Qty]`, `T[[#Headers],[Col]]`) as a distinct
+  token kind that shifts never rewrite.
+
+### Fixed
+
+- `insert_row/4`, `delete_row/4`, `insert_column/4`, and
+  `delete_column/4` on one sheet no longer move cells, merged ranges, or
+  other structure on every other sheet. Other sheets now have only their
+  formulas rewritten, and are re-serialized only when a formula changed.
+- Formula tokenizer: identifiers that resemble cell references
+  (`LOG10(`, `Table1`, `My.A1`) are no longer rewritten as references
+  on row/column shifts. Previously `=LOG10(A1)` became `=LOG11(A2)` and
+  `=SUM(Table1[Amount])` became `=SUM(TABLE2[Amount])` after an insert.
+- `ExVEx.Formula.Reference.parse/1` and `ExVEx.Utils.Coordinate.parse/1`
+  enforce Excel's row (1,048,576) and column (XFD) limits.
+
+### Changed
+
+- `ExVEx.OOXML.Table` is a struct (`parse/1`, `serialize/1`, `shift/2`)
+  rather than a binary-in/binary-out shifter. `ExVEx.OOXML.SheetSatellites`
+  handles comments and drawings only; table parts are handled by
+  `ExVEx.Workbook.TableParts`.
+- Cell value encoding and decoding moved from `ExVEx` into
+  `ExVEx.CellCodec`; `ExVEx.sheet_path/2` delegates to
+  `ExVEx.Workbook.sheet_path/2`.
+
 ## [0.2.0] — 2026-05-21
 
 ### Added

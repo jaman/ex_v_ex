@@ -262,7 +262,8 @@ defmodule ExVEx.Tables do
   defp move_totals_row(book, %Entry{table: %Table{totals_row_count: 0}}, _range), do: {:ok, book}
 
   defp move_totals_row(book, %Entry{table: table} = entry, %Range{} = range) do
-    {old_bottom, left} = table.ref.bottom_right
+    {_, left} = table.ref.top_left
+    {old_bottom, _} = table.ref.bottom_right
     {new_bottom, _} = range.bottom_right
 
     if old_bottom == new_bottom do
@@ -313,8 +314,8 @@ defmodule ExVEx.Tables do
          mut_shift
        ) do
     if before.totals_row_count == 1 and after_shift.totals_row_count == 0 do
-      {old_bottom, left} = before.ref.bottom_right
-      {_, right} = before.ref.bottom_right
+      {_, left} = before.ref.top_left
+      {old_bottom, right} = before.ref.bottom_right
 
       case MutShift.apply_index(mut_shift, old_bottom) do
         :deleted -> book

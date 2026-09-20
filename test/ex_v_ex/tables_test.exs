@@ -117,6 +117,31 @@ defmodule ExVEx.TablesTest do
                ~s(<tablePart r:id="rId1"/><tablePart r:id="rId2"/>)
     end
 
+    test "header_row: false creates a table without a header row or filter", %{out: out} do
+      {:ok, book} = ExVEx.new()
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "A1", 1)
+      {:ok, book} = ExVEx.put_cell(book, "Sheet1", "A2", 2)
+
+      {:ok, book} =
+        ExVEx.add_table(book, "Sheet1", "A1:B2", name: "Raw", header_row: false, style: nil)
+
+      reopened = round_trip(book, out)
+
+      assert {:ok,
+              %Table{
+                header_range: nil,
+                data_range: "A1:B2",
+                columns: ["Column1", "Column2"],
+                style: nil
+              }} =
+               ExVEx.table(reopened, "Raw")
+
+      assert ExVEx.get_cell(reopened, "Sheet1", "A1") == {:ok, 1}
+      assert part(reopened, "xl/tables/table1.xml") =~ ~s(headerRowCount="0")
+      refute part(reopened, "xl/tables/table1.xml") =~ "autoFilter"
+      refute part(reopened, "xl/tables/table1.xml") =~ "tableStyleInfo"
+    end
+
     test "rejects invalid input" do
       book = sales_book()
       {:ok, book_with} = ExVEx.add_table(book, "Sheet1", "A1:C4", name: "Sales")
@@ -260,22 +285,37 @@ defmodule ExVEx.TablesTest do
   describe "resize_table/3" do
     test "growing adds columns from header cells and rows; shrinking drops them", %{out: out} do
       {:ok, book} = ExVEx.add_table(sales_book(), "Sheet1", "A1:C4", name: "Sales")
+
+      {:ok, book} =
+        ExVEx.put_table_totals_row(book, "Sales", Region: {:label, "Total"}, Amount: :sum)
+
       {:ok, book} = ExVEx.put_cell(book, "Sheet1", "D1", "Notes")
-      {:ok, grown} = ExVEx.resize_table(book, "Sales", "A1:E6")
+      {:ok, grown} = ExVEx.resize_table(book, "Sales", "A1:E7")
       reopened = round_trip(grown, out)
 
-      assert {:ok, %Table{ref: "A1:E6", columns: ["Region", "Qty", "Amount", "Notes", "Column5"]}} =
-               ExVEx.table(reopened, "Sales")
+      assert {:ok,
+              %Table{
+                ref: "A1:E7",
+                totals_range: "A7:E7",
+                columns: ["Region", "Qty", "Amount", "Notes", "Column5"]
+              }} = ExVEx.table(reopened, "Sales")
 
       assert ExVEx.get_cell(reopened, "Sheet1", "E1") == {:ok, "Column5"}
+      assert ExVEx.get_cell(reopened, "Sheet1", "A7") == {:ok, "Total"}
+      assert ExVEx.get_cell(reopened, "Sheet1", "A5") == {:ok, nil}
+      assert ExVEx.get_formula(reopened, "Sheet1", "C7") == {:ok, "SUBTOTAL(109,Sales[Amount])"}
+      assert ExVEx.get_formula(reopened, "Sheet1", "C5") == {:ok, nil}
 
-      {:ok, shrunk} = ExVEx.resize_table(reopened, "Sales", "A1:B3")
+      assert ExVEx.resize_table(reopened, "Sales", "A1:B4") == {:error, {:occupied, "A4:B4"}}
+      {:ok, shrunk} = ExVEx.resize_table(reopened, "Sales", "A1:B5")
 
-      assert {:ok, %Table{ref: "A1:B3", columns: ["Region", "Qty"]}} =
+      assert {:ok, %Table{ref: "A1:B5", totals_range: "A5:B5", columns: ["Region", "Qty"]}} =
                ExVEx.table(shrunk, "Sales")
 
-      assert ExVEx.resize_table(shrunk, "Sales", "A2:B3") == {:error, :header_row_must_stay}
-      assert ExVEx.resize_table(shrunk, "Sales", "A1:B1") == {:error, :range_too_small}
+      assert ExVEx.get_cell(shrunk, "Sheet1", "A5") == {:ok, "Total"}
+      assert ExVEx.get_cell(shrunk, "Sheet1", "A7") == {:ok, nil}
+      assert ExVEx.resize_table(shrunk, "Sales", "A2:B5") == {:error, :header_row_must_stay}
+      assert ExVEx.resize_table(shrunk, "Sales", "A1:B2") == {:error, :range_too_small}
     end
   end
 
@@ -452,15 +492,22 @@ defmodule ExVEx.TablesTest do
 
     test "deleting every data row leaves a header and one blank row", %{out: out} do
       {:ok, book} = ExVEx.add_table(sales_book(), "Sheet1", "A1:C4", name: "Sales")
-      {:ok, book} = ExVEx.put_table_totals_row(book, "Sales", Amount: :sum)
+
+      {:ok, book} =
+        ExVEx.put_table_totals_row(book, "Sales",
+          Region: {:label, "Total"},
+          Qty: :count,
+          Amount: :sum
+        )
+
       {:ok, book} = ExVEx.delete_row(book, "Sheet1", 2, 3)
       reopened = round_trip(book, out)
 
       assert {:ok, %Table{ref: "A1:C2", totals_range: nil, columns: ["Region", "Qty", "Amount"]}} =
                ExVEx.table(reopened, "Sales")
 
-      assert ExVEx.get_formula(reopened, "Sheet1", "C2") == {:ok, nil}
-      assert ExVEx.get_cell(reopened, "Sheet1", "C2") == {:ok, nil}
+      assert ExVEx.table_rows(reopened, "Sales") == {:ok, [[nil, nil, nil]]}
+      assert ExVEx.get_formula(reopened, "Sheet1", "B2") == {:ok, nil}
     end
 
     test "deleting the header row adopts the next row's text as column names", %{out: out} do

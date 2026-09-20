@@ -39,6 +39,13 @@ ExVEx.get_cell(book, "Sheet1", {2, 3})            #=> same as ExVEx.get_cell(boo
 {:ok, ["A1:B2"]} = ExVEx.merged_ranges(book, "Sheet1")
 {:ok, book} = ExVEx.unmerge_cells(book, "Sheet1", "A1:B2")
 
+# Excel tables
+{:ok, book} = ExVEx.add_table(book, "Sheet1", "A1:C10", name: "Sales")
+{:ok, %ExVEx.Table{columns: ["Region", "Qty", "Amount"]}} = ExVEx.table(book, "Sales")
+{:ok, book} = ExVEx.append_table_rows(book, "Sales", [["West", 4, 12.5]])
+{:ok, book} = ExVEx.put_table_totals_row(book, "Sales", Amount: :sum)
+{:ok, rows} = ExVEx.table_records(book, "Sales")  #=> [%{"Region" => "North", ...}, ...]
+
 # Save
 :ok = ExVEx.save(book, "inventory.xlsx")
 ```
@@ -46,7 +53,7 @@ ExVEx.get_cell(book, "Sheet1", {2, 3})            #=> same as ExVEx.get_cell(boo
 ## Why
 
 The Elixir ecosystem has `Elixlsx` (write-only) and `xlsx_reader` (read-only),
-but no first-class story for *editing existing* spreadsheets. Every team that
+but nothing that *edits existing* spreadsheets. Every team that
 needs this today reaches for Python (`openpyxl`) or a Rust NIF — which drags
 a second runtime into the deployment.
 
@@ -84,7 +91,16 @@ validated against [umya-spreadsheet](https://crates.io/crates/umya-spreadsheet)
   merged ranges, defined names, conditional formatting, data validations,
   auto-filters, comments, tables, and drawing anchors — so formulas,
   charts, and comments keep pointing at the same logical cells after
-  the shift
+  the shift. Structural changes touch only the target sheet; other sheets
+  have just their formulas rewritten
+- Excel tables (`add_table/4`, `tables/1,2`, `table/2`, `remove_table/2`,
+  `rename_table/3`, `rename_table_column/4`, `resize_table/3`,
+  `put_table_style/3`, `put_table_totals_row/3`,
+  `remove_table_totals_row/2`, `table_rows/2`, `table_records/2`,
+  `append_table_rows/3`). Structured references (`Sales[Amount]`,
+  `[@Qty]`) are never rewritten by row/column shifts; column and table
+  renames rewrite them everywhere; removing a table converts them to
+  plain ranges
 
 ### Not yet
 
